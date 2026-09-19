@@ -44,6 +44,23 @@ defmodule BlockScoutWeb.API.V2.TransactionControllerTest do
       assert response["next_page_params"] == nil
     end
 
+    # `token_creation` is reported off `created_contract_address.token`, which is
+    # only there while the participant preload keeps loading `:token`.
+    test "reports token_creation for a transaction that created a token", %{conn: conn} do
+      contract_address = insert(:contract_address)
+      insert(:token, contract_address: contract_address)
+
+      :transaction
+      |> insert()
+      |> with_block()
+      |> with_contract_creation(contract_address)
+
+      request = get(conn, "/api/v2/transactions")
+
+      assert %{"items" => [item]} = json_response(request, 200)
+      assert "token_creation" in item["transaction_types"]
+    end
+
     test "transactions with next_page_params", %{conn: conn} do
       transactions =
         51
@@ -207,6 +224,37 @@ defmodule BlockScoutWeb.API.V2.TransactionControllerTest do
   end
 
   describe "/transactions/{transaction_hash}" do
+    test "returns authorization list for EIP-7702 (type 4) transaction", %{conn: conn} do
+      transaction =
+        :transaction
+        |> insert(type: 4)
+        |> with_block()
+
+      authorization = insert(:signed_authorization, transaction: transaction, index: 0)
+
+      request = get(conn, "/api/v2/transactions/#{transaction.hash}")
+      response = json_response(request, 200)
+
+      assert [%{"address_hash" => address_hash, "authority" => authority, "nonce" => "0"}] =
+               response["authorization_list"]
+
+      assert address_hash == Address.checksum(authorization.address)
+      assert authority == Address.checksum(authorization.authority)
+      assert "set_code_transaction" in response["transaction_types"]
+    end
+
+    test "returns empty authorization list for non-EIP-7702 transaction", %{conn: conn} do
+      transaction =
+        :transaction
+        |> insert(type: 2)
+        |> with_block()
+
+      request = get(conn, "/api/v2/transactions/#{transaction.hash}")
+      response = json_response(request, 200)
+
+      assert response["authorization_list"] == []
+    end
+
     test "get token-transfers with ok reputation", %{conn: conn} do
       init_value = Application.get_env(:block_scout_web, :hide_scam_addresses)
       Application.put_env(:block_scout_web, :hide_scam_addresses, true)
