@@ -43,6 +43,12 @@
 	handle /sitemap.xml {
 		reverse_proxy backend:4000
 	}
+	handle /ads.txt {
+		reverse_proxy backend:4000
+	}
+	handle /llms-full.txt {
+		reverse_proxy backend:4000
+	}
 	handle /auth/* {
 		reverse_proxy backend:4000
 	}

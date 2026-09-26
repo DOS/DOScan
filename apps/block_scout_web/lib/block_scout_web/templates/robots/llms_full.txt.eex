@@ -1,0 +1,57 @@
+# <%= subnetwork_title() %> Explorer - Full Documentation for LLMs
+
+> Comprehensive technical context, architecture, and API guide for <%= subnetwork_title() %> Explorer.
+
+## Network Information
+- Network: <%= network_title() %>
+- Subnetwork / Chain: <%= subnetwork_title() %>
+- Native Coin: <%= coin() %>
+- Explorer URL: <%= host() %>
+
+## Overview
+<%= subnetwork_title() %> Explorer is an open-source, EVM-compatible block explorer powered by Blockscout. It provides indexing and querying for blocks, transactions, smart contracts, tokens (ERC-20, ERC-721, ERC-1155), logs, and account balances.
+
+## Key APIs for Developers and AI Agents
+
+### 1. REST API v2 (Recommended)
+Base URL: `<%= host() %>/api/v2`
+All responses are formatted in JSON.
+- `GET <%= host() %>/api/v2/blocks`: List recent blocks (supports pagination).
+- `GET <%= host() %>/api/v2/blocks/{block_number_or_hash}`: Get details of a specific block.
+- `GET <%= host() %>/api/v2/transactions`: List recent transactions.
+- `GET <%= host() %>/api/v2/transactions/{tx_hash}`: Get transaction details, receipt, and status.
+- `GET <%= host() %>/api/v2/addresses/{address_hash}`: Query address information, <%= coin() %> balance, and contract status.
+- `GET <%= host() %>/api/v2/addresses/{address_hash}/transactions`: Transactions associated with an address.
+- `GET <%= host() %>/api/v2/addresses/{address_hash}/token-balances`: Token holdings of an address.
+- `GET <%= host() %>/api/v2/tokens`: List tracked tokens with search and filter.
+- `GET <%= host() %>/api/v2/tokens/{token_address}`: Token details, total supply, decimals, and holders count.
+- `GET <%= host() %>/api/v2/smart-contracts`: List verified smart contracts.
+- `GET <%= host() %>/api/v2/smart-contracts/{address_hash}`: Fetch smart contract source code, ABI, and compilation metadata.
+- Interactive Swagger/OpenAPI documentation: `<%= host() %>/api-docs`
+
+### 2. Ethereum JSON-RPC Compatible API
+Base URL: `<%= host() %>/api/eth-rpc` or `<%= host() %>/api`
+- Standard RPC module endpoints supporting `eth_blockNumber`, `eth_getBlockByNumber`, `eth_getTransactionByHash`, `eth_call`, etc.
+- Interactive Eth RPC documentation: `<%= host() %>/eth-rpc-api-docs`
+
+### 3. GraphQL API
+Base URL: `<%= host() %>/graphql`
+- Full GraphQL API for flexible querying across blocks, transactions, and addresses.
+- GraphiQL explorer: `<%= host() %>/graphiql`
+- GraphQL Schema: `<%= host() %>/schema.graphql`
+
+## Smart Contract Interaction
+- Verified contracts expose their ABI and source code at `<%= host() %>/address/{address_hash}?tab=contract`.
+- Read and Write contract tabs allow direct interaction with deployed contracts through web3 or JSON-RPC.
+
+## Common Data Types
+- Address: 42-character hexadecimal string starting with `0x`.
+- Transaction Hash: 66-character hexadecimal string starting with `0x`.
+- Block Number: Positive integer.
+- Token Values: Standard ERC-20 token values are returned in their smallest unit (base units) according to their decimals.
+
+## Discovery Files
+- [llms.txt](<%= host() %>/llms.txt): Concise index for AI/LLMs.
+- [sitemap.xml](<%= host() %>/sitemap.xml): Search engine indexing map.
+- [robots.txt](<%= host() %>/robots.txt): Web crawler rules.
+- [ads.txt](<%= host() %>/ads.txt): Authorized digital sellers.

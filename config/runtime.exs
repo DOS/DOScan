@@ -128,6 +128,18 @@ config :block_scout_web, BlockScoutWeb.Chain,
   enable_testnet_label: ConfigHelper.parse_bool_env_var("SHOW_TESTNET_LABEL"),
   testnet_label_text: System.get_env("TESTNET_LABEL_TEXT", "Testnet")
 
+config :block_scout_web, :ads_txt,
+  content: System.get_env("ADS_TXT_CONTENT"),
+  file_path: System.get_env("ADS_TXT_FILE_PATH")
+
+config :block_scout_web, :llms_txt,
+  content: System.get_env("LLMS_TXT_CONTENT"),
+  file_path: System.get_env("LLMS_TXT_FILE_PATH")
+
+config :block_scout_web, :llms_full_txt,
+  content: System.get_env("LLMS_FULL_TXT_CONTENT"),
+  file_path: System.get_env("LLMS_FULL_TXT_FILE_PATH")
+
 config :block_scout_web, BlockScoutWeb.Notifier,
   block_broadcast_enrichment_timeout: 200,
   block_broadcast_enrichment_disabled: ConfigHelper.parse_bool_env_var("DISABLE_BLOCK_BROADCAST_ENRICHMENT"),

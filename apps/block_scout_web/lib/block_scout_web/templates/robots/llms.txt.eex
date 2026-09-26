@@ -1,0 +1,22 @@
+# <%= subnetwork_title() %> Explorer
+
+> <%= subnetwork_title() %> Explorer is the block explorer for querying blocks, transactions, tokens, smart contracts, and addresses on <%= network_title() %>.
+
+## Core Resources & APIs
+- [API Documentation](<%= host() %>/api-docs): Interactive OpenAPI / Swagger documentation for Blockscout REST API v2 and RPC endpoints.
+- [Eth RPC Documentation](<%= host() %>/eth-rpc-api-docs): Ethereum JSON-RPC compatible API documentation and methods.
+- [GraphQL Explorer](<%= host() %>/graphiql): GraphiQL console and schema explorer for custom blockchain data queries.
+- [GraphQL Schema](<%= host() %>/schema.graphql): Full GraphQL schema definition.
+- [Verified Smart Contracts](<%= host() %>/verified-contracts): Verified smart contracts with public source code, ABI, and compiler configurations.
+
+## Explorer Navigation
+- [Home](<%= host() %>/): Network overview, latest blocks, and recent transactions.
+- [Blocks](<%= host() %>/blocks): Validated blocks on <%= subnetwork_title() %>.
+- [Transactions](<%= host() %>/txs): Confirmed transaction details, receipts, and event logs.
+- [Tokens](<%= host() %>/tokens): ERC-20, ERC-721, and ERC-1155 token tracker and holder balances.
+- [Accounts](<%= host() %>/accounts): Top addresses sorted by native <%= coin() %> balance.
+
+## Discovery & Meta
+- [Full LLM Context](<%= host() %>/llms-full.txt): Detailed documentation and API reference for AI/LLMs.
+- [XML Sitemap](<%= host() %>/sitemap.xml): Search engine indexing map.
+- [Robots](<%= host() %>/robots.txt): Web crawler directives.

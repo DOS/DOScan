@@ -16,6 +16,15 @@ doscan.io, www.doscan.io {
         reverse_proxy backend:4000
     }
 
+    # Ads & LLMs metadata
+    handle /ads.txt {
+        reverse_proxy backend:4000
+    }
+
+    handle /llms-full.txt {
+        reverse_proxy backend:4000
+    }
+
     # Auth
     handle /auth/* {
         reverse_proxy backend:4000

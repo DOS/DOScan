@@ -1,0 +1,5 @@
+# ads.txt for <%= subnetwork_title() %> Explorer (<%= host() %>)
+#
+# No third-party digital ad sellers are currently authorized.
+# To configure authorized digital sellers, set the ADS_TXT_CONTENT
+# or ADS_TXT_FILE_PATH environment variable.

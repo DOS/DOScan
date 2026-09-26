@@ -4,3 +4,4 @@
 # User-agent: *
 # Disallow: /
 Sitemap: <%= APIDocsView.blockscout_url(true) %>/sitemap.xml
+# LLM Context: <%= APIDocsView.blockscout_url(true) %>/llms.txt

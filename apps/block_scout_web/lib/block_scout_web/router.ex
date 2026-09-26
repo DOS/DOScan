@@ -5,7 +5,10 @@ defmodule BlockScoutWeb.Router do
   use Utils.CompileTimeEnvHelper,
     admin_panel_enabled: [:block_scout_web, :admin_panel_enabled],
     graphql_enabled: [:block_scout_web, [Api.GraphQL, :enabled]],
-    api_router_reading_enabled: [:block_scout_web, [BlockScoutWeb.Routers.ApiRouter, :reading_enabled]],
+    api_router_reading_enabled: [
+      :block_scout_web,
+      [BlockScoutWeb.Routers.ApiRouter, :reading_enabled]
+    ],
     web_router_enabled: [:block_scout_web, [BlockScoutWeb.Routers.WebRouter, :enabled]]
 
   alias BlockScoutWeb.Routers.{AccountRouter, ApiRouter}
@@ -27,7 +30,7 @@ defmodule BlockScoutWeb.Router do
     )
 
     plug(BlockScoutWeb.Plug.Logger, application: :block_scout_web)
-    plug(:accepts, ["html"])
+    plug(:accepts, ["html", "txt", "xml"])
     plug(:fetch_session)
     plug(:fetch_flash)
     plug(:protect_from_forgery)
@@ -93,6 +96,9 @@ defmodule BlockScoutWeb.Router do
 
     get("/robots.txt", RobotsController, :robots)
     get("/sitemap.xml", RobotsController, :sitemap)
+    get("/ads.txt", RobotsController, :ads)
+    get("/llms.txt", RobotsController, :llms)
+    get("/llms-full.txt", RobotsController, :llms_full)
 
     if @api_router_reading_enabled do
       get("/api-docs", APIDocsController, :index)
