@@ -15,6 +15,11 @@ config :explorer, Explorer.Chain.Cache.Counters.AverageBlockTime, enabled: false
 # This causes a ConnectionOwnership error
 config :explorer, Explorer.Chain.Transaction.History.Historian, enabled: false
 
+config :explorer, Explorer.Chain.Cache.Counters.AddressCounters, enabled: false
+config :explorer, Explorer.Chain.Cache.Counters.AddressCountersConsolidator, enabled: false
+config :explorer, Explorer.Chain.Cache.Counters.TokenCounters, enabled: false
+config :explorer, Explorer.Chain.Cache.Counters.TokenCountersConsolidator, enabled: false
+
 for counter <- [
       Explorer.Chain.Cache.Counters.AddressesCount,
       Explorer.Chain.Cache.Counters.Optimism.LastOutputRootSizeCount,
@@ -77,9 +82,12 @@ for migrator <- [
       Explorer.Migrator.UnescapeQuotesInTokens,
       Explorer.Migrator.UnescapeAmpersandsInTokens,
       Explorer.Migrator.SanitizeDuplicateSmartContractAdditionalSources,
+      Explorer.Migrator.ReindexBlocksWithUncatalogedTokenTransfers,
       Explorer.Migrator.DeleteZeroValueInternalTransactions,
       Explorer.Migrator.EmptyInternalTransactionsData,
       Explorer.Migrator.FillInternalTransactionsAddressIds,
+      Explorer.Migrator.BackfillAddressCounters,
+      Explorer.Migrator.BackfillTokenCounters,
 
       # Heavy DB index operations
       Explorer.Migrator.HeavyDbIndexOperation.CreateLogsBlockHashIndex,
