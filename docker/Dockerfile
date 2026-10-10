@@ -3,7 +3,12 @@ FROM hexpm/elixir:1.19.4-erlang-27.3.4.6-alpine-3.22.2 AS builder-deps
 WORKDIR /app
 
 RUN apk --no-cache --update add \
+<<<<<<< HEAD
     alpine-sdk gmp-dev automake libtool inotify-tools autoconf python3 file gcompat libstdc++ curl ca-certificates git make bash ffmpeg-dev
+=======
+    alpine-sdk gmp-dev automake libtool inotify-tools autoconf python3 file gcompat libstdc++ curl ca-certificates git make bash \
+    ffmpeg-dev pkgconfig
+>>>>>>> v12.0.0
 
 # Cache elixir deps
 COPY mix.exs mix.lock ./
@@ -40,8 +45,6 @@ ARG BRIDGED_TOKENS_ENABLED
 ENV BRIDGED_TOKENS_ENABLED=${BRIDGED_TOKENS_ENABLED}
 ARG API_GRAPHQL_MAX_COMPLEXITY
 ENV API_GRAPHQL_MAX_COMPLEXITY=${API_GRAPHQL_MAX_COMPLEXITY}
-ARG MUD_INDEXER_ENABLED
-ENV MUD_INDEXER_ENABLED=${MUD_INDEXER_ENABLED}
 
 # Run backend compilation
 RUN mix compile
@@ -60,7 +63,11 @@ ARG BLOCKSCOUT_GROUP=blockscout
 ARG BLOCKSCOUT_UID=10001
 ARG BLOCKSCOUT_GID=10001
 
+<<<<<<< HEAD
 RUN apk --no-cache --update add jq curl ffmpeg-libs && \
+=======
+RUN apk --no-cache --update add jq curl ffmpeg && \
+>>>>>>> v12.0.0
     addgroup --system --gid ${BLOCKSCOUT_GID} ${BLOCKSCOUT_GROUP} && \
     adduser --system --uid ${BLOCKSCOUT_UID} --ingroup ${BLOCKSCOUT_GROUP} --disabled-password --home /app ${BLOCKSCOUT_USER}
 
@@ -78,8 +85,6 @@ ARG BRIDGED_TOKENS_ENABLED
 ENV BRIDGED_TOKENS_ENABLED=${BRIDGED_TOKENS_ENABLED}
 ARG API_GRAPHQL_MAX_COMPLEXITY
 ENV API_GRAPHQL_MAX_COMPLEXITY=${API_GRAPHQL_MAX_COMPLEXITY}
-ARG MUD_INDEXER_ENABLED
-ENV MUD_INDEXER_ENABLED=${MUD_INDEXER_ENABLED}
 
 ARG RELEASE_VERSION
 ENV RELEASE_VERSION=${RELEASE_VERSION}
