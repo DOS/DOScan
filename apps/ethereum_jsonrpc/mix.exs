@@ -20,7 +20,7 @@ defmodule EthereumJSONRPC.MixProject do
       elixirc_paths: elixirc_paths(Mix.env()),
       lockfile: "../../mix.lock",
       start_permanent: Mix.env() == :prod,
-      version: "11.2.8"
+      version: "12.0.0"
     ]
   end
 
@@ -64,13 +64,12 @@ defmodule EthereumJSONRPC.MixProject do
       {:ex_keccak, "~> 0.7.5"},
       # JSONRPC HTTP Post calls
       {:httpoison, "~> 2.0"},
-      # Decode/Encode JSON for JSONRPC
-      {:jason, "~> 1.3"},
+
       # Log errors and application output to separate files
       {:logger_file_backend, "~> 0.0.10"},
       {:logger_json, "~> 7.0"},
       # Mocking `EthereumJSONRPC.Transport` and `EthereumJSONRPC.HTTP` so we avoid hitting real chains for local testing
-      {:mox, "~> 1.3.1", only: [:test]},
+      {:mox, "~> 1.3.2", only: [:test]},
       {:prometheus_ex, "~> 5.1.0", override: true},
       # Tracing
       {:spandex, "~> 3.0"},
