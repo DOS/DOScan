@@ -961,12 +961,33 @@ jobs:
           # package in small chunks, each with its own bounded retries, then reassemble and
           # verify the checksum on the host before the apply step reads it.
           deploy_id="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          remote_prefix="/tmp/doscan-testnet-config-${deploy_id}.part-"
+          # The package carries NFT media credentials: chunks go into a 0700 directory created
+          # before any upload, so their own file mode does not matter.
+          remote_dir="/tmp/doscan-testnet-config-${deploy_id}.d"
           expected_sha="$(sha256sum /tmp/doscan-testnet-config.tgz | cut -d ' ' -f1)"
           chunk_dir="$(mktemp -d)"
+          remote_ready=0
+          remote_ssh() {
+            gcloud compute ssh "${GCP_TESTNET_INSTANCE}" \
+              --project="${GCP_PROJECT_ID}" \
+              --zone="${GCP_TESTNET_ZONE}" \
+              --tunnel-through-iap \
+              --command="$1"
+          }
+          cleanup() {
+            rm -rf "${chunk_dir}"
+            if [ "${remote_ready}" -eq 1 ]; then
+              remote_ssh "rm -rf ${remote_dir}" || true
+            fi
+          }
+          trap cleanup EXIT
+
           split -b 64k -d -a 4 /tmp/doscan-testnet-config.tgz "${chunk_dir}/part-"
           chunk_count="$(find "${chunk_dir}" -name 'part-*' | wc -l)"
           echo "Uploading $(stat -c %s /tmp/doscan-testnet-config.tgz) bytes in ${chunk_count} chunks"
+
+          remote_ssh "set -euo pipefail; rm -rf ${remote_dir}; install -d -m 700 ${remote_dir}"
+          remote_ready=1
 
           for chunk in "${chunk_dir}"/part-*; do
             name="$(basename "${chunk}")"
@@ -977,29 +998,25 @@ jobs:
                 --tunnel-through-iap \
                 --scp-flag=-O \
                 "${chunk}" \
-                "${GCP_TESTNET_INSTANCE}:${remote_prefix}${name#part-}"; then
+                "${GCP_TESTNET_INSTANCE}:${remote_dir}/${name}"; then
                 break
               fi
               if [ "${attempt}" -eq 5 ]; then
                 echo "Chunk ${name} upload through IAP failed after ${attempt} attempts" >&2
-                rm -rf "${chunk_dir}"
                 exit 1
               fi
               sleep $((attempt * 5))
             done
           done
-          rm -rf "${chunk_dir}"
 
-          gcloud compute ssh "${GCP_TESTNET_INSTANCE}" \
-            --project="${GCP_PROJECT_ID}" \
-            --zone="${GCP_TESTNET_ZONE}" \
-            --tunnel-through-iap \
-            --command="set -euo pipefail; umask 077; \
-              archive=/tmp/doscan-testnet-config-${deploy_id}.tgz; \
-              test \"\$(ls ${remote_prefix}* | wc -l)\" -eq ${chunk_count}; \
-              cat \$(ls ${remote_prefix}* | sort) > \"\${archive}\"; \
-              rm -f ${remote_prefix}*; \
-              echo '${expected_sha}  '\"\${archive}\" | sha256sum -c -"
+          # Reassemble into the archive path the apply step expects, verify, then drop the chunks.
+          remote_ssh "set -euo pipefail; umask 077; \
+            archive=/tmp/doscan-testnet-config-${deploy_id}.tgz; \
+            test \"\$(ls ${remote_dir}/part-* | wc -l)\" -eq ${chunk_count}; \
+            cat \$(ls ${remote_dir}/part-* | sort) > \"\${archive}\"; \
+            if ! echo '${expected_sha}  '\"\${archive}\" | sha256sum -c -; then rm -f \"\${archive}\"; exit 1; fi; \
+            rm -rf ${remote_dir}"
+          remote_ready=0
 
       - name: Remove local testnet package containing NFT media credentials
         if: always()
