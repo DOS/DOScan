@@ -757,6 +757,9 @@ class ValidateTestnetBensTests(unittest.TestCase):
         self.assertIn('if [ "${attempt}" -eq 3 ]', validation_step)
 
     def test_testnet_iap_upload_hard_caps_and_retries(self):
+        # IAP transfers to dos-testnet-r0 stall after ~128-160 KiB in one stream, so the step
+        # uploads 64 KiB chunks into a private remote directory, each with bounded retries, and
+        # reassembles and verifies them on the host.
         workflow = (
             ROOT / ".github" / "workflows" / "deploy-config.yml"
         ).read_text(encoding="utf-8")
@@ -772,8 +775,21 @@ class ValidateTestnetBensTests(unittest.TestCase):
         if os.name == "nt":
             bash = r"C:\\Program Files\\Git\\bin\\bash.exe"
 
+        def to_bash_path(path):
+            posix = path.as_posix()
+            if os.name == "nt":
+                return f"/{path.drive[0].lower()}{posix[2:]}"
+            return posix
+
         with tempfile.TemporaryDirectory() as directory:
             directory_path = Path(directory)
+            package_path = directory_path / "doscan-testnet-config.tgz"
+            # 150000 bytes -> three 64 KiB chunks.
+            package_path.write_bytes(os.urandom(150000))
+            script = upload_script.replace(
+                "/tmp/doscan-testnet-config.tgz", to_bash_path(package_path)
+            )
+
             timeout_path = directory_path / "timeout"
             gcloud_path = directory_path / "gcloud"
             cloudsdk_python_path = directory_path / "cloudsdk-python"
@@ -798,7 +814,7 @@ class ValidateTestnetBensTests(unittest.TestCase):
                 "  exit 0\n"
                 "fi\n"
                 "printf '%s sitepackages=%s\\n' \"$*\" \"${CLOUDSDK_PYTHON_SITEPACKAGES:-0}\" >> \"${FAKE_GCLOUD_CALLS}\"\n"
-                "if [ \"${FAKE_GCLOUD_FAIL:-0}\" -eq 1 ]; then\n"
+                "if [ \"${2}\" = \"scp\" ] && [ \"${FAKE_SCP_FAIL:-0}\" -eq 1 ]; then\n"
                 "  exit 42\n"
                 "fi\n",
                 encoding="utf-8",
@@ -815,15 +831,10 @@ class ValidateTestnetBensTests(unittest.TestCase):
                 "printf '%s\\n' \"$*\" >> \"${FAKE_SLEEP_CALLS}\"\n",
                 encoding="utf-8",
             )
-            timeout_path.chmod(0o755)
-            gcloud_path.chmod(0o755)
-            cloudsdk_python_path.chmod(0o755)
-            sleep_path.chmod(0o755)
+            for path in (timeout_path, gcloud_path, cloudsdk_python_path, sleep_path):
+                path.chmod(0o755)
 
-            fake_bin = directory_path.as_posix()
-            if os.name == "nt":
-                fake_bin = f"/{directory_path.drive[0].lower()}{fake_bin[2:]}"
-            command = f'PATH="{fake_bin}:$PATH"; export PATH; {upload_script}'
+            command = f'PATH="{to_bash_path(directory_path)}:$PATH"; export PATH; {script}'
             environment = os.environ | {
                 "FAKE_TIMEOUT_CALLS": str(timeout_calls_path),
                 "FAKE_GCLOUD_CALLS": str(gcloud_calls_path),
@@ -836,79 +847,71 @@ class ValidateTestnetBensTests(unittest.TestCase):
                 "GITHUB_RUN_ID": "123",
                 "GITHUB_RUN_ATTEMPT": "1",
             }
-            success_result = subprocess.run(
-                [bash, "-c", command],
-                capture_output=True,
-                text=True,
-                check=False,
-                env=environment,
-            )
-            success_timeout_calls = timeout_calls_path.read_text(
+
+            def run(extra=None):
+                for path in (timeout_calls_path, gcloud_calls_path, sleep_calls_path):
+                    path.unlink(missing_ok=True)
+                result = subprocess.run(
+                    [bash, "-c", command],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    env=environment | (extra or {}),
+                )
+
+                def lines(path):
+                    if not path.exists():
+                        return []
+                    return path.read_text(encoding="utf-8").splitlines()
+
+                return (
+                    result,
+                    lines(timeout_calls_path),
+                    lines(gcloud_calls_path),
+                    lines(sleep_calls_path),
+                )
+
+            success, success_timeouts, success_gcloud, _ = run()
+            cloudsdk_python_calls = cloudsdk_python_calls_path.read_text(
                 encoding="utf-8"
             ).splitlines()
-            success_gcloud_calls = gcloud_calls_path.read_text(
-                encoding="utf-8"
-            ).splitlines()
-            cloudsdk_python_calls = (
-                cloudsdk_python_calls_path.read_text(encoding="utf-8").splitlines()
-                if cloudsdk_python_calls_path.exists()
-                else []
+            failure, failure_timeouts, failure_gcloud, failure_sleeps = run(
+                {"FAKE_SCP_FAIL": "1"}
             )
 
-            timeout_calls_path.unlink()
-            gcloud_calls_path.unlink()
-            sleep_calls_path.unlink(missing_ok=True)
-            failure_result = subprocess.run(
-                [bash, "-c", command],
-                capture_output=True,
-                text=True,
-                check=False,
-                env=environment | {"FAKE_GCLOUD_FAIL": "1"},
-            )
-            failure_timeout_calls = timeout_calls_path.read_text(
-                encoding="utf-8"
-            ).splitlines()
-            failure_gcloud_calls = gcloud_calls_path.read_text(
-                encoding="utf-8"
-            ).splitlines()
-            failure_sleep_calls = sleep_calls_path.read_text(
-                encoding="utf-8"
-            ).splitlines()
+        remote_dir = "/tmp/doscan-testnet-config-123-1.d"
 
-        self.assertEqual(0, success_result.returncode, success_result.stderr)
-        self.assertEqual("", success_result.stderr)
-        self.assertEqual(1, len(success_timeout_calls))
-        self.assertEqual(1, len(success_gcloud_calls))
+        self.assertEqual(0, success.returncode, success.stderr)
         self.assertEqual(["-m pip install numpy"], cloudsdk_python_calls)
-        self.assertTrue(
-            all(
-                call.startswith("compute scp ") and call.endswith("sitepackages=1")
-                for call in success_gcloud_calls
-            )
+        self.assertIn("in 3 chunks", success.stdout)
+        # Private directory first, one bounded scp per chunk, then reassembly and checksum.
+        self.assertEqual(5, len(success_gcloud), success_gcloud)
+        self.assertTrue(success_gcloud[0].startswith("compute ssh "))
+        self.assertIn(f"install -d -m 700 {remote_dir}", success_gcloud[0])
+        scp_calls = success_gcloud[1:4]
+        self.assertTrue(all(call.startswith("compute scp ") for call in scp_calls))
+        self.assertTrue(all("--scp-flag=-O" in call for call in scp_calls))
+        self.assertTrue(all(call.endswith("sitepackages=1") for call in scp_calls))
+        self.assertEqual(
+            [f"{remote_dir}/part-000{index}" for index in range(3)],
+            [call.split("test-instance:", 1)[1].split()[0] for call in scp_calls],
         )
+        self.assertTrue(success_gcloud[4].startswith("compute ssh "))
+        self.assertIn("sha256sum -c -", success_gcloud[4])
+        self.assertIn(f"rm -rf {remote_dir}", success_gcloud[4])
+        self.assertEqual(3, len(success_timeouts))
         self.assertTrue(
-            all("--scp-flag=-O" in call for call in success_gcloud_calls)
+            all(call.startswith("--signal=KILL 60s gcloud compute scp") for call in success_timeouts)
         )
-        self.assertNotEqual(0, failure_result.returncode)
-        self.assertEqual(3, len(failure_timeout_calls))
-        self.assertEqual(3, len(failure_gcloud_calls))
-        self.assertTrue(
-            all(
-                call.startswith("compute scp ") and call.endswith("sitepackages=1")
-                for call in failure_gcloud_calls
-            )
-        )
-        self.assertTrue(
-            all("--scp-flag=-O" in call for call in failure_gcloud_calls)
-        )
-        self.assertEqual(["5", "10"], failure_sleep_calls)
-        self.assertIn("failed after 3 attempts", failure_result.stderr)
-        self.assertTrue(
-            all(
-                call.startswith("--signal=KILL 90s gcloud compute scp")
-                for call in success_timeout_calls + failure_timeout_calls
-            )
-        )
+
+        # A chunk that never uploads: 5 bounded attempts with backoff, then cleanup and failure.
+        self.assertNotEqual(0, failure.returncode)
+        self.assertIn("failed after 5 attempts", failure.stderr)
+        self.assertEqual(5, len(failure_timeouts))
+        self.assertEqual(["5", "10", "15", "20"], failure_sleeps)
+        self.assertTrue(failure_gcloud[-1].startswith("compute ssh "))
+        self.assertIn(f"rm -rf {remote_dir}", failure_gcloud[-1])
+        self.assertFalse(any("sha256sum" in call for call in failure_gcloud))
 
     def test_rpc_retry_discards_failed_attempt_output(self):
         bash = "bash"
