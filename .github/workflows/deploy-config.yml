@@ -951,15 +951,14 @@ jobs:
       - name: Upload testnet configuration through IAP
         run: |
           set -euo pipefail
-          cloudsdk_python="$(gcloud info --format='value(basic.python_location)')"
-          "${cloudsdk_python}" -m pip install numpy
-          export CLOUDSDK_PYTHON_SITEPACKAGES=1
-
-          # IAP transfers from GitHub runners to dos-testnet-r0 stall after ~128-160 KiB in one
-          # stream (partial files of 131072 and 163840 bytes were left on the host by the
-          # 2026-09-26 runs), so every testnet deploy since 2026-08-23 failed here. Upload the
-          # package in small chunks, each with its own bounded retries, then reassemble and
-          # verify the checksum on the host before the apply step reads it.
+          # Use the default gcloud IAP transport, exactly like the mainnet upload step. On
+          # 2026-08-23 this step switched to the numpy "high-bandwidth" websocket mode
+          # (CLOUDSDK_PYTHON_SITEPACKAGES=1) with legacy scp (-O). From then on every testnet
+          # upload stalled with sshd accepting the key but no data arriving, even for a 64 KiB
+          # chunk (run 39301972185), while mainnet uploads and a workstation scp to the same
+          # host kept working. The last successful testnet upload (run 32604916222) predates it.
+          # Chunks keep each transfer small and individually retried; the host reassembles and
+          # verifies the checksum before the apply step reads the archive.
           umask 077
           deploy_id="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           # The package carries NFT media credentials: chunks go into a 0700 directory created
@@ -997,7 +996,6 @@ jobs:
                 --project="${GCP_PROJECT_ID}" \
                 --zone="${GCP_TESTNET_ZONE}" \
                 --tunnel-through-iap \
-                --scp-flag=-O \
                 "${chunk}" \
                 "${GCP_TESTNET_INSTANCE}:${remote_dir}/${name}"; then
                 break

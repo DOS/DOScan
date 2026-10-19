@@ -872,9 +872,6 @@ class ValidateTestnetBensTests(unittest.TestCase):
                 )
 
             success, success_timeouts, success_gcloud, _ = run()
-            cloudsdk_python_calls = cloudsdk_python_calls_path.read_text(
-                encoding="utf-8"
-            ).splitlines()
             failure, failure_timeouts, failure_gcloud, failure_sleeps = run(
                 {"FAKE_SCP_FAIL": "1"}
             )
@@ -882,7 +879,8 @@ class ValidateTestnetBensTests(unittest.TestCase):
         remote_dir = "/tmp/doscan-testnet-config-123-1.d"
 
         self.assertEqual(0, success.returncode, success.stderr)
-        self.assertEqual(["-m pip install numpy"], cloudsdk_python_calls)
+        # Default IAP transport like mainnet: no numpy websocket mode, no legacy scp.
+        self.assertFalse(cloudsdk_python_calls_path.exists())
         self.assertIn("in 3 chunks", success.stdout)
         # Private directory first, one bounded scp per chunk, then reassembly and checksum.
         self.assertEqual(5, len(success_gcloud), success_gcloud)
@@ -890,8 +888,8 @@ class ValidateTestnetBensTests(unittest.TestCase):
         self.assertIn(f"install -d -m 700 {remote_dir}", success_gcloud[0])
         scp_calls = success_gcloud[1:4]
         self.assertTrue(all(call.startswith("compute scp ") for call in scp_calls))
-        self.assertTrue(all("--scp-flag=-O" in call for call in scp_calls))
-        self.assertTrue(all(call.endswith("sitepackages=1") for call in scp_calls))
+        self.assertFalse(any("--scp-flag=-O" in call for call in scp_calls))
+        self.assertTrue(all(call.endswith("sitepackages=0") for call in scp_calls))
         self.assertEqual(
             [f"{remote_dir}/part-000{index}" for index in range(3)],
             [call.split("test-instance:", 1)[1].split()[0] for call in scp_calls],
