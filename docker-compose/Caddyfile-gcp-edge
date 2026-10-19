@@ -86,10 +86,13 @@ l1.doscan.io {
 		host main2.doschain.com main3.doschain.com
 		path /ws
 	}
+	# WebSocket frames cannot be filtered by method, and the archive node enables the debug
+	# namespace for DOScan tracing. Public archive WebSockets therefore use the pruned main
+	# node (no debug), like main.doschain.com/ws.
 	handle @archive_websocket {
-		header X-DOS-RPC-Origin "archive-doscan-mainnet"
+		header X-DOS-RPC-Origin "icm-r0"
 		rewrite * /ext/bc/2ewKoUrSjnviEgGmeTiELHBmNjxVTVczBPowST471rYUZvA9bk/ws
-		reverse_proxy host.docker.internal:9650 {
+		reverse_proxy 10.148.0.8:19650 {
 			header_down -Access-Control-Allow-Origin
 			header_down -Access-Control-Allow-Methods
 			header_down -Access-Control-Allow-Headers
@@ -97,11 +100,14 @@ l1.doscan.io {
 		}
 	}
 
+	# Public archive HTTP RPC goes through mainnet-rpc-guard (DOS/DOS-Chain
+	# services/mainnet-rpc-guard), which rejects debug_*, admin_* and personal_* calls.
+	# DOScan's own backend still reads the archive node directly on :9650.
 	@archive_rpc host main2.doschain.com main3.doschain.com
 	handle @archive_rpc {
 		header X-DOS-RPC-Origin "archive-doscan-mainnet"
 		rewrite * /ext/bc/2ewKoUrSjnviEgGmeTiELHBmNjxVTVczBPowST471rYUZvA9bk/rpc
-		reverse_proxy host.docker.internal:9650 {
+		reverse_proxy host.docker.internal:9652 {
 			header_down -Access-Control-Allow-Origin
 			header_down -Access-Control-Allow-Methods
 			header_down -Access-Control-Allow-Headers
