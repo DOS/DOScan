@@ -960,6 +960,7 @@ jobs:
           # 2026-09-26 runs), so every testnet deploy since 2026-08-23 failed here. Upload the
           # package in small chunks, each with its own bounded retries, then reassemble and
           # verify the checksum on the host before the apply step reads it.
+          umask 077
           deploy_id="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           # The package carries NFT media credentials: chunks go into a 0700 directory created
           # before any upload, so their own file mode does not matter.
