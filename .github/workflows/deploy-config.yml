@@ -996,6 +996,7 @@ jobs:
                 --project="${GCP_PROJECT_ID}" \
                 --zone="${GCP_TESTNET_ZONE}" \
                 --tunnel-through-iap \
+                --scp-flag=-v \
                 "${chunk}" \
                 "${GCP_TESTNET_INSTANCE}:${remote_dir}/${name}"; then
                 break

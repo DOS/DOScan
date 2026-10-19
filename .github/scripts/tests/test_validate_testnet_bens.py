@@ -889,6 +889,8 @@ class ValidateTestnetBensTests(unittest.TestCase):
         scp_calls = success_gcloud[1:4]
         self.assertTrue(all(call.startswith("compute scp ") for call in scp_calls))
         self.assertFalse(any("--scp-flag=-O" in call for call in scp_calls))
+        # OpenSSH debug1 output (no secrets) shows where a stalled transfer stops.
+        self.assertTrue(all("--scp-flag=-v" in call for call in scp_calls))
         self.assertTrue(all(call.endswith("sitepackages=0") for call in scp_calls))
         self.assertEqual(
             [f"{remote_dir}/part-000{index}" for index in range(3)],
