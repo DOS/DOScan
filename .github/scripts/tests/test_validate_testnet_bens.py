@@ -784,8 +784,8 @@ class ValidateTestnetBensTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             directory_path = Path(directory)
             package_path = directory_path / "doscan-testnet-config.tgz"
-            # 150000 bytes -> three 64 KiB chunks.
-            package_path.write_bytes(os.urandom(150000))
+            # 40000 bytes -> three 16 KiB chunks.
+            package_path.write_bytes(os.urandom(40000))
             script = upload_script.replace(
                 "/tmp/doscan-testnet-config.tgz", to_bash_path(package_path)
             )
@@ -813,10 +813,11 @@ class ValidateTestnetBensTests(unittest.TestCase):
                 "  printf '%s' \"${FAKE_CLOUDSDK_PYTHON}\"\n"
                 "  exit 0\n"
                 "fi\n"
-                "printf '%s sitepackages=%s\\n' \"$*\" \"${CLOUDSDK_PYTHON_SITEPACKAGES:-0}\" >> \"${FAKE_GCLOUD_CALLS}\"\n"
-                "if [ \"${2}\" = \"scp\" ] && [ \"${FAKE_SCP_FAIL:-0}\" -eq 1 ]; then\n"
-                "  exit 42\n"
-                "fi\n",
+                "chunk=\"${LC_DOSCAN_CHUNK:-}\"\n"
+                "printf '%s chunkbytes=%s\\n' \"$*\" \"${#chunk}\" >> \"${FAKE_GCLOUD_CALLS}\"\n"
+                "case \"$*\" in *'base64 -d >'*)\n"
+                "  if [ \"${FAKE_CHUNK_FAIL:-0}\" -eq 1 ]; then exit 42; fi ;;\n"
+                "esac\n",
                 encoding="utf-8",
             )
             cloudsdk_python_path.write_text(
@@ -873,7 +874,7 @@ class ValidateTestnetBensTests(unittest.TestCase):
 
             success, success_timeouts, success_gcloud, _ = run()
             failure, failure_timeouts, failure_gcloud, failure_sleeps = run(
-                {"FAKE_SCP_FAIL": "1"}
+                {"FAKE_CHUNK_FAIL": "1"}
             )
 
         remote_dir = "/tmp/doscan-testnet-config-123-1.d"
@@ -882,26 +883,28 @@ class ValidateTestnetBensTests(unittest.TestCase):
         # Default IAP transport like mainnet: no numpy websocket mode, no legacy scp.
         self.assertFalse(cloudsdk_python_calls_path.exists())
         self.assertIn("in 3 chunks", success.stdout)
-        # Private directory first, one bounded scp per chunk, then reassembly and checksum.
+        # Private directory first, then one bounded ssh per chunk carrying the chunk in the
+        # LC_DOSCAN_CHUNK env request (never in the command line), then reassembly and checksum.
         self.assertEqual(5, len(success_gcloud), success_gcloud)
-        self.assertTrue(success_gcloud[0].startswith("compute ssh "))
+        self.assertTrue(all(call.startswith("compute ssh ") for call in success_gcloud))
         self.assertIn(f"install -d -m 700 {remote_dir}", success_gcloud[0])
-        scp_calls = success_gcloud[1:4]
-        self.assertTrue(all(call.startswith("compute scp ") for call in scp_calls))
-        self.assertFalse(any("--scp-flag=-O" in call for call in scp_calls))
-        # OpenSSH debug1 output (no secrets) shows where a stalled transfer stops.
-        self.assertTrue(all("--scp-flag=-v" in call for call in scp_calls))
-        self.assertTrue(all(call.endswith("sitepackages=0") for call in scp_calls))
+        chunk_calls = success_gcloud[1:4]
+        self.assertFalse(any(" scp " in f" {call} " for call in success_gcloud))
+        self.assertTrue(all("--ssh-flag=-oSendEnv=LC_DOSCAN_CHUNK" in call for call in chunk_calls))
+        for index, call in enumerate(chunk_calls):
+            self.assertIn(f"base64 -d > {remote_dir}/part-000{index}", call)
+            self.assertIn("${LC_DOSCAN_CHUNK:?missing chunk}", call)
+        # base64 of 16384 bytes is 21848 characters; the last chunk is 40000 - 32768 = 7232 bytes.
         self.assertEqual(
-            [f"{remote_dir}/part-000{index}" for index in range(3)],
-            [call.split("test-instance:", 1)[1].split()[0] for call in scp_calls],
+            ["chunkbytes=21848", "chunkbytes=21848", "chunkbytes=9644"],
+            [call.rsplit(" ", 1)[1] for call in chunk_calls],
         )
-        self.assertTrue(success_gcloud[4].startswith("compute ssh "))
+        self.assertTrue(success_gcloud[4].endswith("chunkbytes=0"))
         self.assertIn("sha256sum -c -", success_gcloud[4])
         self.assertIn(f"rm -rf {remote_dir}", success_gcloud[4])
         self.assertEqual(3, len(success_timeouts))
         self.assertTrue(
-            all(call.startswith("--signal=KILL 60s gcloud compute scp") for call in success_timeouts)
+            all(call.startswith("--signal=KILL 60s gcloud compute ssh") for call in success_timeouts)
         )
 
         # A chunk that never uploads: 5 bounded attempts with backoff, then cleanup and failure.

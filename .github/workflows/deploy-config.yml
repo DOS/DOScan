@@ -951,14 +951,14 @@ jobs:
       - name: Upload testnet configuration through IAP
         run: |
           set -euo pipefail
-          # Use the default gcloud IAP transport, exactly like the mainnet upload step. On
-          # 2026-08-23 this step switched to the numpy "high-bandwidth" websocket mode
-          # (CLOUDSDK_PYTHON_SITEPACKAGES=1) with legacy scp (-O). From then on every testnet
-          # upload stalled with sshd accepting the key but no data arriving, even for a 64 KiB
-          # chunk (run 39301972185), while mainnet uploads and a workstation scp to the same
-          # host kept working. The last successful testnet upload (run 32604916222) predates it.
-          # Chunks keep each transfer small and individually retried; the host reassembles and
-          # verifies the checksum before the apply step reads the archive.
+          # Every testnet upload since 2026-08-23 stalled: scp -v (run 39307307642) shows SSH auth
+          # and the sftp subsystem succeed, then the bulk data channel from GitHub runners to
+          # dos-testnet-r0 never progresses, with the default transport and 64 KiB chunks alike.
+          # Small SSH control messages do pass (the mkdir and reassembly commands always ran).
+          # So each 16 KiB chunk travels base64-encoded in an SSH env request (LC_* is accepted
+          # by sshd), not in the data channel and not in the command line, where other local
+          # users could read it through /proc. The host reassembles the chunks and verifies the
+          # checksum before the apply step reads the archive.
           umask 077
           deploy_id="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           # The package carries NFT media credentials: chunks go into a 0700 directory created
@@ -982,7 +982,7 @@ jobs:
           }
           trap cleanup EXIT
 
-          split -b 64k -d -a 4 /tmp/doscan-testnet-config.tgz "${chunk_dir}/part-"
+          split -b 16k -d -a 4 /tmp/doscan-testnet-config.tgz "${chunk_dir}/part-"
           chunk_count="$(find "${chunk_dir}" -name 'part-*' | wc -l)"
           echo "Uploading $(stat -c %s /tmp/doscan-testnet-config.tgz) bytes in ${chunk_count} chunks"
 
@@ -992,13 +992,13 @@ jobs:
           for chunk in "${chunk_dir}"/part-*; do
             name="$(basename "${chunk}")"
             for attempt in 1 2 3 4 5; do
-              if timeout --signal=KILL 60s gcloud compute scp \
+              if LC_DOSCAN_CHUNK="$(base64 -w0 "${chunk}")" timeout --signal=KILL 60s gcloud compute ssh \
+                "${GCP_TESTNET_INSTANCE}" \
                 --project="${GCP_PROJECT_ID}" \
                 --zone="${GCP_TESTNET_ZONE}" \
                 --tunnel-through-iap \
-                --scp-flag=-v \
-                "${chunk}" \
-                "${GCP_TESTNET_INSTANCE}:${remote_dir}/${name}"; then
+                --ssh-flag=-oSendEnv=LC_DOSCAN_CHUNK \
+                --command="set -euo pipefail; umask 077; printf '%s' \"\${LC_DOSCAN_CHUNK:?missing chunk}\" | base64 -d > ${remote_dir}/${name}; test \"\$(stat -c %s ${remote_dir}/${name})\" -eq $(stat -c %s "${chunk}")"; then
                 break
               fi
               if [ "${attempt}" -eq 5 ]; then
