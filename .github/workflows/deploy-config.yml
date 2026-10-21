@@ -63,6 +63,7 @@ env:
   GCP_WORKLOAD_IDENTITY_PROVIDER: projects/535583621422/locations/global/workloadIdentityPools/github/providers/doscan-provider
   GCP_TESTNET_ZONE: asia-southeast1-a
   GCP_TESTNET_INSTANCE: dos-testnet-r0
+  GCP_TESTNET_STAGING_BUCKET: dos-doscan-testnet-staging-535583621422
   DOS_NAMES_REPOSITORY: https://github.com/DOS/DOS-Names-Contracts.git
   DOS_NAMES_MAINNET_SUBGRAPH_REF: 6224395661280a739c20ebd8a420913a0dd7fd6e
   DOS_NAMES_TESTNET_SUBGRAPH_REF: 130d42ae22881896cab89e33c3c3c096b9b8e989
@@ -948,75 +949,60 @@ jobs:
           bash .github/scripts/verify-testnet-package.sh /tmp/doscan-testnet-config.tgz
           rm -f /tmp/common-blockscout-nft-media.env
 
-      - name: Upload testnet configuration through IAP
+      - name: Upload testnet configuration through GCS staging
         run: |
           set -euo pipefail
-          # Every testnet upload since 2026-08-23 stalled: scp -v (run 39307307642) shows SSH auth
-          # and the sftp subsystem succeed, then the bulk data channel from GitHub runners to
-          # dos-testnet-r0 never progresses, with the default transport and 64 KiB chunks alike.
-          # Small SSH control messages do pass (the mkdir and reassembly commands always ran).
-          # So each 16 KiB chunk travels base64-encoded in an SSH env request (LC_* is accepted
-          # by sshd), not in the data channel and not in the command line, where other local
-          # users could read it through /proc. The host reassembles the chunks and verifies the
-          # checksum before the apply step reads the archive.
+          # IAP bulk data from GitHub runners to dos-testnet-r0 never progresses (scp, sftp,
+          # 64 KiB chunks and a single ~22 KB SSH env request all stalled; runs 39301972185,
+          # 39304824553, 39307307642, 39467829664), while small control commands always pass.
+          # So the package goes runner -> GCS staging bucket (infra/gcp/testnet-deploy-staging)
+          # and r0 downloads it over HTTPS through a 15-minute V4 signed URL (covers all three
+          # attempts). r0 needs no IAM. The URL travels in an SSH env request and reaches curl
+          # as a config on stdin, so it is in no process argv on either side (/proc/*/cmdline is
+          # world-readable). The object is deleted afterwards, and a 1-day lifecycle rule backs
+          # that up.
           umask 077
           deploy_id="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          # The package carries NFT media credentials: chunks go into a 0700 directory created
-          # before any upload, so their own file mode does not matter.
-          remote_dir="/tmp/doscan-testnet-config-${deploy_id}.d"
+          object="gs://${GCP_TESTNET_STAGING_BUCKET}/deploy/doscan-testnet-config-${deploy_id}.tgz"
           expected_sha="$(sha256sum /tmp/doscan-testnet-config.tgz | cut -d ' ' -f1)"
-          chunk_dir="$(mktemp -d)"
-          remote_ready=0
-          remote_ssh() {
-            gcloud compute ssh "${GCP_TESTNET_INSTANCE}" \
-              --project="${GCP_PROJECT_ID}" \
-              --zone="${GCP_TESTNET_ZONE}" \
-              --tunnel-through-iap \
-              --command="$1"
-          }
           cleanup() {
-            rm -rf "${chunk_dir}"
-            if [ "${remote_ready}" -eq 1 ]; then
-              remote_ssh "rm -rf ${remote_dir}" || true
-            fi
+            gcloud storage rm --quiet "${object}" >/dev/null 2>&1 || true
           }
           trap cleanup EXIT
 
-          split -b 16k -d -a 4 /tmp/doscan-testnet-config.tgz "${chunk_dir}/part-"
-          chunk_count="$(find "${chunk_dir}" -name 'part-*' | wc -l)"
-          echo "Uploading $(stat -c %s /tmp/doscan-testnet-config.tgz) bytes in ${chunk_count} chunks"
+          echo "Staging $(stat -c %s /tmp/doscan-testnet-config.tgz) bytes"
+          gcloud storage cp --quiet /tmp/doscan-testnet-config.tgz "${object}"
+          signed_url="$(gcloud storage sign-url "${object}" \
+            --impersonate-service-account="${GCP_SERVICE_ACCOUNT}" \
+            --duration=15m \
+            --http-verb=GET \
+            --format='value(signed_url)')"
+          case "${signed_url}" in
+            https://storage.googleapis.com/*) ;;
+            *) echo "Unexpected signed URL output" >&2; exit 1 ;;
+          esac
 
-          remote_ssh "set -euo pipefail; rm -rf ${remote_dir}; install -d -m 700 ${remote_dir}"
-          remote_ready=1
-
-          for chunk in "${chunk_dir}"/part-*; do
-            name="$(basename "${chunk}")"
-            for attempt in 1 2 3 4 5; do
-              if LC_DOSCAN_CHUNK="$(base64 -w0 "${chunk}")" timeout --signal=KILL 60s gcloud compute ssh \
-                "${GCP_TESTNET_INSTANCE}" \
-                --project="${GCP_PROJECT_ID}" \
-                --zone="${GCP_TESTNET_ZONE}" \
-                --tunnel-through-iap \
-                --ssh-flag=-oSendEnv=LC_DOSCAN_CHUNK \
-                --command="set -euo pipefail; umask 077; printf '%s' \"\${LC_DOSCAN_CHUNK:?missing chunk}\" | base64 -d > ${remote_dir}/${name}; test \"\$(stat -c %s ${remote_dir}/${name})\" -eq $(stat -c %s "${chunk}")"; then
-                break
-              fi
-              if [ "${attempt}" -eq 5 ]; then
-                echo "Chunk ${name} upload through IAP failed after ${attempt} attempts" >&2
-                exit 1
-              fi
-              sleep $((attempt * 5))
-            done
+          for attempt in 1 2 3; do
+            if LC_DOSCAN_URL="${signed_url}" timeout --signal=KILL 180s gcloud compute ssh \
+              "${GCP_TESTNET_INSTANCE}" \
+              --project="${GCP_PROJECT_ID}" \
+              --zone="${GCP_TESTNET_ZONE}" \
+              --tunnel-through-iap \
+              --ssh-flag=-oSendEnv=LC_DOSCAN_URL \
+              --command="set -euo pipefail; umask 077; \
+                archive=/tmp/doscan-testnet-config-${deploy_id}.tgz; \
+                printf 'url = \"%s\"\n' \"\${LC_DOSCAN_URL:?missing url}\" \
+                  | curl -fsS --retry 3 --max-time 120 -o \"\${archive}\" -K - \
+                  || { rm -f \"\${archive}\"; exit 1; }; \
+                if ! echo '${expected_sha}  '\"\${archive}\" | sha256sum -c -; then rm -f \"\${archive}\"; exit 1; fi"; then
+              exit 0
+            fi
+            if [ "${attempt}" -eq 3 ]; then
+              echo "Testnet package download on ${GCP_TESTNET_INSTANCE} failed after ${attempt} attempts" >&2
+              exit 1
+            fi
+            sleep $((attempt * 5))
           done
-
-          # Reassemble into the archive path the apply step expects, verify, then drop the chunks.
-          remote_ssh "set -euo pipefail; umask 077; \
-            archive=/tmp/doscan-testnet-config-${deploy_id}.tgz; \
-            test \"\$(ls ${remote_dir}/part-* | wc -l)\" -eq ${chunk_count}; \
-            cat \$(ls ${remote_dir}/part-* | sort) > \"\${archive}\"; \
-            if ! echo '${expected_sha}  '\"\${archive}\" | sha256sum -c -; then rm -f \"\${archive}\"; exit 1; fi; \
-            rm -rf ${remote_dir}"
-          remote_ready=0
 
       - name: Remove local testnet package containing NFT media credentials
         if: always()
