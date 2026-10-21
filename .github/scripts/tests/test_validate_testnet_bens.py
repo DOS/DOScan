@@ -270,7 +270,7 @@ class ValidateTestnetBensTests(unittest.TestCase):
             "  DOS_NAMES_MAINNET_SUBGRAPH_REF: "
             "6224395661280a739c20ebd8a420913a0dd7fd6e\n"
             "  DOS_NAMES_TESTNET_SUBGRAPH_REF: "
-            "130d42ae22881896cab89e33c3c3c096b9b8e989"
+            "3345d09ec2cad8ebbca710b89b630c7ba04481d7"
         )
         self.assertIn(split_pins, workflow)
         previous_workflow = workflow.replace(
