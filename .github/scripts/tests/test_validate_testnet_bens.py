@@ -882,6 +882,8 @@ class ValidateTestnetBensTests(unittest.TestCase):
         self.assertIn("--http-verb=GET", success_gcloud[1])
         # objectUser has no storage.buckets.get, so the region must be explicit.
         self.assertIn("--region=asia-southeast1", success_gcloud[1])
+        # Path-style URLs match the https://storage.googleapis.com/* host check.
+        self.assertIn("--path-style-url", success_gcloud[1])
         ssh_call = success_gcloud[2]
         self.assertTrue(args(ssh_call).startswith("compute ssh test-instance "))
         self.assertIn("--ssh-flag=-oSendEnv=LC_DOSCAN_URL", ssh_call)

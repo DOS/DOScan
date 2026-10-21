@@ -977,6 +977,7 @@ jobs:
             --duration=15m \
             --http-verb=GET \
             --region=asia-southeast1 \
+            --path-style-url \
             --format='value(signed_url)')"
           case "${signed_url}" in
             https://storage.googleapis.com/*) ;;
