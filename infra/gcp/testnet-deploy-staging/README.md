@@ -27,7 +27,7 @@ the same runners work, and a workstation scp to r0 works.
 | Retention | soft delete disabled; lifecycle deletes objects after 1 day; the workflow deletes its object at the end of the step |
 | Writer | `doscan-deploy@dos--ai.iam.gserviceaccount.com`: `roles/storage.objectUser` on this bucket only |
 | Signer | `doscan-deploy` holds `roles/iam.serviceAccountTokenCreator` on itself (service-account resource, not project) to mint V4 signed URLs without a key file |
-| Reader | none. r0 downloads with a 10-minute signed GET URL. The URL travels in an SSH `LC_*` env request, not on the command line |
+| Reader | none. r0 downloads with a 15-minute signed GET URL. The URL travels in an SSH `LC_*` env request and reaches `curl` as a config on stdin, so it is in no process argv (`/proc/*/cmdline` is world-readable) |
 
 The VMs' default compute service account is shared by every VM in the project,
 so granting it bucket read would expose the package to all of them. The signed
@@ -45,10 +45,12 @@ bash infra/gcp/testnet-deploy-staging/provision.sh verify  # read back settings 
 
 ## Rollback
 
+1. Revert the workflow change that introduced the GCS upload step, so no run depends on the bucket.
+2. Remove the signer binding and the bucket (`rm --recursive` on the bucket URL deletes its objects and the bucket):
+
 ```bash
 gcloud iam service-accounts remove-iam-policy-binding doscan-deploy@dos--ai.iam.gserviceaccount.com \
   --project=dos--ai --member=serviceAccount:doscan-deploy@dos--ai.iam.gserviceaccount.com \
   --role=roles/iam.serviceAccountTokenCreator
 gcloud storage rm --recursive gs://dos-doscan-testnet-staging-535583621422
-gcloud storage buckets delete gs://dos-doscan-testnet-staging-535583621422
 ```

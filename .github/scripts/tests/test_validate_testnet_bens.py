@@ -878,12 +878,19 @@ class ValidateTestnetBensTests(unittest.TestCase):
         self.assertTrue(args(success_gcloud[0]).endswith(obj))
         self.assertTrue(args(success_gcloud[1]).startswith(f"storage sign-url {obj} "))
         self.assertIn("--impersonate-service-account=deploy@test-project.iam.gserviceaccount.com", success_gcloud[1])
-        self.assertIn("--duration=10m", success_gcloud[1])
+        self.assertIn("--duration=15m", success_gcloud[1])
         self.assertIn("--http-verb=GET", success_gcloud[1])
         ssh_call = success_gcloud[2]
         self.assertTrue(args(ssh_call).startswith("compute ssh test-instance "))
         self.assertIn("--ssh-flag=-oSendEnv=LC_DOSCAN_URL", ssh_call)
         self.assertIn("${LC_DOSCAN_URL:?missing url}", ssh_call)
+        # On the host the URL reaches curl as a config on stdin (printf is a builtin), so it
+        # is never in any process argv; a partial archive is removed on any download failure.
+        curl_part = ssh_call.split("| curl ", 1)[1].split(";", 1)[0]
+        self.assertIn("-K -", curl_part)
+        self.assertNotIn("LC_DOSCAN_URL", curl_part)
+        self.assertIn('printf \'url = "%s"\\n\' "${LC_DOSCAN_URL:?missing url}"', ssh_call)
+        self.assertIn('|| { rm -f "${archive}"; exit 1; }', ssh_call)
         self.assertIn("sha256sum -c -", ssh_call)
         self.assertIn("/tmp/doscan-testnet-config-123-1.tgz", ssh_call)
         # The signed URL rides only in the env request, never in any command line.
