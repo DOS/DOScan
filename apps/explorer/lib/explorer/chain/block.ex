@@ -175,6 +175,8 @@ defmodule Explorer.Chain.Block.Schema do
         field(:transactions_fees, :decimal, virtual: true)
         field(:burnt_fees, :decimal, virtual: true)
         field(:priority_fees, :decimal, virtual: true)
+        # `{base_fee_max_change_denominator, elasticity_multiplier}` resolved by `preload_eip1559_config/1`
+        field(:eip1559_config, :any, virtual: true)
 
         timestamps()
 
@@ -497,27 +499,64 @@ defmodule Explorer.Chain.Block do
 
   def uncle_reward_coef, do: @uncle_reward_coef
 
-  # Gets EIP-1559 config actual for the given block number.
+  @doc """
+  Resolves the EIP-1559 config actual for each of the given blocks with a single query.
+
+  The config is put into the `eip1559_config` virtual field, so that `gas_target/1` and
+  `next_block_base_fee_per_gas/1` don't query the config per block. Does nothing (and makes no queries)
+  unless the chain type is `optimism`, where the config is dynamic and read from the
+  `op_eip1559_config_updates` table.
+
+  ## Parameters
+  - `blocks`: The blocks to resolve the config for.
+
+  ## Returns
+  - The same blocks with the `eip1559_config` field set.
+  """
+  @spec preload_eip1559_config([t()]) :: [t()]
+  def preload_eip1559_config(blocks) do
+    if Application.get_env(:explorer, :chain_type) == :optimism do
+      configs =
+        blocks
+        |> Enum.map(& &1.number)
+        # credo:disable-for-next-line Credo.Check.Design.AliasUsage
+        |> Explorer.Chain.Optimism.EIP1559ConfigUpdate.actual_configs_for_blocks()
+
+      Enum.map(blocks, fn block ->
+        %{block | eip1559_config: eip1559_config_or_default(Map.fetch!(configs, block.number))}
+      end)
+    else
+      blocks
+    end
+  end
+
+  # Gets EIP-1559 config actual for the given block, preferring the one resolved by `preload_eip1559_config/1`.
   # If not found, returns EIP_1559_BASE_FEE_MAX_CHANGE_DENOMINATOR and EIP_1559_ELASTICITY_MULTIPLIER env values.
   #
   # ## Parameters
-  # - `block_number`: The given block number.
+  # - `block`: The given block.
   #
   # ## Returns
   # - `{denominator, multiplier}` tuple.
-  @spec get_eip1559_config(non_neg_integer()) :: {non_neg_integer(), non_neg_integer()}
-  defp get_eip1559_config(block_number) do
-    with true <- Application.get_env(:explorer, :chain_type) == :optimism,
-         # credo:disable-for-next-line Credo.Check.Design.AliasUsage
-         config = Explorer.Chain.Optimism.EIP1559ConfigUpdate.actual_config_for_block(block_number),
-         false <- is_nil(config) do
-      {denominator, multiplier, _min_base_fee} = config
-      {denominator, multiplier}
+  @spec get_eip1559_config(t()) :: {non_neg_integer(), non_neg_integer()}
+  defp get_eip1559_config(%{eip1559_config: {_denominator, _multiplier} = config}), do: config
+
+  defp get_eip1559_config(block) do
+    if Application.get_env(:explorer, :chain_type) == :optimism do
+      block.number
+      # credo:disable-for-next-line Credo.Check.Design.AliasUsage
+      |> Explorer.Chain.Optimism.EIP1559ConfigUpdate.actual_config_for_block()
+      |> eip1559_config_or_default()
     else
-      _ ->
-        {Application.get_env(:explorer, :base_fee_max_change_denominator),
-         Application.get_env(:explorer, :elasticity_multiplier)}
+      eip1559_config_or_default(nil)
     end
+  end
+
+  defp eip1559_config_or_default({denominator, multiplier, _min_base_fee}), do: {denominator, multiplier}
+
+  defp eip1559_config_or_default(nil) do
+    {Application.get_env(:explorer, :base_fee_max_change_denominator),
+     Application.get_env(:explorer, :elasticity_multiplier)}
   end
 
   @doc """
@@ -538,7 +577,7 @@ defmodule Explorer.Chain.Block do
   @spec gas_target(t()) :: float()
   def gas_target(block) do
     if Decimal.compare(block.gas_limit, 0) == :gt do
-      {_, elasticity_multiplier} = get_eip1559_config(block.number)
+      {_, elasticity_multiplier} = get_eip1559_config(block)
 
       ratio = Decimal.div(block.gas_used, Decimal.div(block.gas_limit, elasticity_multiplier))
       ratio |> Decimal.sub(1) |> Decimal.mult(100) |> Decimal.to_float()
@@ -592,7 +631,7 @@ defmodule Explorer.Chain.Block do
 
   @spec next_block_base_fee_per_gas(t()) :: Decimal.t() | nil
   def next_block_base_fee_per_gas(block) do
-    {base_fee_max_change_denominator, elasticity_multiplier} = get_eip1559_config(block.number)
+    {base_fee_max_change_denominator, elasticity_multiplier} = get_eip1559_config(block)
 
     gas_target = Decimal.div_int(block.gas_limit, elasticity_multiplier)
 
@@ -714,9 +753,35 @@ defmodule Explorer.Chain.Block do
 
   @spec set_refetch_needed(integer | [integer]) :: :ok
   def set_refetch_needed(block_numbers) when is_list(block_numbers) do
-    query =
-      from(block in Block,
-        where: block.number in ^block_numbers,
+    Block
+    |> where([block], block.number in ^block_numbers)
+    |> set_refetch_needed_by_query()
+
+    :ok
+  end
+
+  def set_refetch_needed(block_number), do: set_refetch_needed([block_number])
+
+  @doc """
+  Marks the consensus blocks with the given numbers, except for the blocks with the
+  given hashes, with `refetch_needed` and adds their numbers to the missing block ranges.
+
+  Used when an import of the blocks with these numbers and hashes has failed before
+  storing them: the consensus blocks stored at these numbers may belong to a stale fork.
+
+  ## Returns
+  - The numbers of the marked blocks
+  """
+  @spec set_refetch_needed_for_other_consensus_blocks([integer], [Hash.Full.t() | String.t()]) :: [integer]
+  def set_refetch_needed_for_other_consensus_blocks(block_numbers, hashes) do
+    Block
+    |> where([block], block.number in ^block_numbers and block.consensus and block.hash not in ^hashes)
+    |> set_refetch_needed_by_query()
+  end
+
+  defp set_refetch_needed_by_query(query) do
+    locked_query =
+      from(block in query,
         # Enforce Block ShareLocks order (see docs: sharelocks.md)
         order_by: [asc: block.hash],
         lock: "FOR NO KEY UPDATE"
@@ -724,16 +789,14 @@ defmodule Explorer.Chain.Block do
 
     {_count, updated_numbers} =
       Repo.update_all(
-        from(b in Block, join: s in subquery(query), on: b.hash == s.hash, select: b.number),
+        from(b in Block, join: s in subquery(locked_query), on: b.hash == s.hash, select: b.number),
         set: [refetch_needed: true, updated_at: Timex.now()]
       )
 
     MissingBlockRange.add_ranges_by_block_numbers(updated_numbers)
 
-    :ok
+    updated_numbers
   end
-
-  def set_refetch_needed(block_number), do: set_refetch_needed([block_number])
 
   # Re-enqueues the blocks, their transactions, and the addresses they touched for export to
   # the Multichain Service database.
