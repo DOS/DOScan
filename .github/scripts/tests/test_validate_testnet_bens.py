@@ -37,6 +37,18 @@ class ValidateTestnetBensTests(unittest.TestCase):
     def test_repository_configuration_is_valid(self):
         self.assertEqual([], self.module.validate())
 
+    def test_browser_nft_guard_accepts_same_tab_and_popup_navigation(self):
+        spec = (ROOT / ".github" / "scripts" / "testnet-bens-ui.spec.mjs").read_text(
+            encoding="utf-8"
+        )
+        for marker in (
+            r'''tokenLink\.getAttribute\(\s*['"]target['"]\s*\)''',
+            r'''if\s*\(\s*tokenTarget\s*===\s*['"]_blank['"]\s*\)''',
+            r"let\s+tokenPage\s*=\s*page\b",
+            r"if\s*\(\s*tokenPage\s*!==\s*page\s*\)",
+        ):
+            self.assertRegex(spec, marker)
+
     def test_adapter_manifest_mount_is_outside_read_only_code_directory(self):
         compose = (ROOT / "docker-compose" / "docker-compose-testnet.yml").read_text(
             encoding="utf-8"

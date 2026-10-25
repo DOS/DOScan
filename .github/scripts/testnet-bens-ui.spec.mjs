@@ -88,15 +88,25 @@ test("DOS Name search resolves through the Testnet UI", async ({ page }) => {
   const tokenUrl = new URL(await tokenLink.getAttribute("href"), baseUrl);
   expect(tokenUrl.origin).toBe(new URL(baseUrl).origin);
   expect(tokenUrl.protocol).toBe("https:");
-  const [tokenPage] = await Promise.all([
-    page.waitForEvent("popup"),
-    tokenLink.click(),
-  ]);
-  await tokenPage.waitForLoadState("domcontentloaded");
+  const tokenTarget = await tokenLink.getAttribute("target");
+  let tokenPage = page;
+  if (tokenTarget === "_blank") {
+    [tokenPage] = await Promise.all([
+      page.waitForEvent("popup"),
+      tokenLink.click(),
+    ]);
+  } else {
+    await tokenLink.click();
+  }
+  if (tokenPage !== page) {
+    await tokenPage.waitForLoadState("domcontentloaded");
+  }
   await expect(tokenPage).toHaveURL(tokenUrl.toString());
   const tokenId = tokenUrl.pathname.split("/").at(-1);
   await expect(tokenPage.getByRole("heading").filter({ hasText: tokenId })).toBeVisible();
   await expect(tokenPage.getByRole("heading", { name: "Page not found" })).toHaveCount(0);
   await expect(tokenPage.getByText("Oops! Something went wrong")).toHaveCount(0);
-  await tokenPage.close();
+  if (tokenPage !== page) {
+    await tokenPage.close();
+  }
 });
