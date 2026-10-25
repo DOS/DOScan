@@ -98,7 +98,9 @@ test("DOS Name search resolves through the Testnet UI", async ({ page }) => {
   } else {
     await tokenLink.click();
   }
-  await tokenPage.waitForLoadState("domcontentloaded");
+  if (tokenPage !== page) {
+    await tokenPage.waitForLoadState("domcontentloaded");
+  }
   await expect(tokenPage).toHaveURL(tokenUrl.toString());
   const tokenId = tokenUrl.pathname.split("/").at(-1);
   await expect(tokenPage.getByRole("heading").filter({ hasText: tokenId })).toBeVisible();
