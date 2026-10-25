@@ -66,7 +66,7 @@ env:
   GCP_TESTNET_STAGING_BUCKET: dos-doscan-testnet-staging-535583621422
   DOS_NAMES_REPOSITORY: https://github.com/DOS/DOS-Names-Contracts.git
   DOS_NAMES_MAINNET_SUBGRAPH_REF: 6224395661280a739c20ebd8a420913a0dd7fd6e
-  DOS_NAMES_TESTNET_SUBGRAPH_REF: 3345d09ec2cad8ebbca710b89b630c7ba04481d7
+  DOS_NAMES_TESTNET_SUBGRAPH_REF: 2d47fb77bb09dcbdc9d7bfeee77d12ddbebc2e4d
 
 jobs:
   changes:
@@ -896,6 +896,7 @@ jobs:
           [ "$(git -C "${checkout}" rev-parse HEAD)" = "${DOS_NAMES_TESTNET_SUBGRAPH_REF}" ]
           test -f "${checkout}/subgraph/dos-names/subgraph.template.yaml"
           test -f "${checkout}/contracts/deployments/dos-testnet-3939.json"
+          test -s "${checkout}/subgraph/dos-names/adapter/server.mjs"
           cp -a "${checkout}/subgraph/dos-names" docker-compose/bens/subgraph
           cp "${checkout}/contracts/deployments/dos-testnet-3939.json" \
             docker-compose/bens/deployment.json
@@ -1056,7 +1057,7 @@ jobs:
                   sudo env DOSCAN_BLOCKSCOUT_SECRETS_ENV="${SECRETS_ENV}" \
                     docker compose config --services 2>/dev/null || true
                 )"
-                for service in bens bens-graph-node bens-ipfs bens-db; do
+                for service in bens-ensv2-adapter bens bens-graph-node bens-ipfs bens-db; do
                   if grep -qx "${service}" <<<"${current_services}"; then
                     sudo env DOSCAN_BLOCKSCOUT_SECRETS_ENV="${SECRETS_ENV}" \
                       docker compose rm -sf "${service}" || restore_rc=1
@@ -1571,6 +1572,8 @@ jobs:
                 docker compose --profile bens-deploy run --rm bens-deployer
               sudo env DOSCAN_BLOCKSCOUT_SECRETS_ENV="${SECRETS_ENV}" \
                 docker compose up -d bens
+              sudo env DOSCAN_BLOCKSCOUT_SECRETS_ENV="${SECRETS_ENV}" \
+                docker compose up -d --force-recreate bens-ensv2-adapter
 
               graph_synced=0
               for attempt in $(seq 1 60); do

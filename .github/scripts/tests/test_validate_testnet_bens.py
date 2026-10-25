@@ -10,6 +10,7 @@ import textwrap
 import threading
 import unittest
 from pathlib import Path
+from urllib.parse import urljoin
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -35,6 +36,48 @@ class ValidateTestnetBensTests(unittest.TestCase):
 
     def test_repository_configuration_is_valid(self):
         self.assertEqual([], self.module.validate())
+
+    def test_validator_rejects_public_http_routing_for_internal_bens_history(self):
+        template = json.loads(self.module.BENS_TEMPLATE.read_text(encoding="utf-8"))
+        template["subgraphs_reader"]["networks"]["3939"]["blockscout"]["url"] = (
+            "https://test.doscan.io"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.template.json"
+            path.write_text(json.dumps(template), encoding="utf-8")
+            original_template = self.module.BENS_TEMPLATE
+            self.module.BENS_TEMPLATE = path
+            try:
+                self.assertIn(
+                    "BENS transaction history must keep internal backend routing",
+                    self.module.validate(),
+                )
+            finally:
+                self.module.BENS_TEMPLATE = original_template
+
+    def test_renderer_preserves_internal_history_url_for_official_bens(self):
+        spec = importlib.util.spec_from_file_location(
+            "render_testnet_bens", ROOT / "scripts" / "render-testnet-bens.py"
+        )
+        renderer = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(renderer)
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "config.json"
+            renderer.render_config(
+                self.module.BENS_TEMPLATE,
+                output,
+                {
+                    "contracts": {
+                        "rootRegistry": "0x1111111111111111111111111111111111111111"
+                    }
+                },
+            )
+            config = json.loads(output.read_text(encoding="utf-8"))
+        base = config["subgraphs_reader"]["networks"]["3939"]["blockscout"]["url"]
+        self.assertEqual(
+            "http://backend:4000/api/v2/transactions/0x1234",
+            urljoin(base, "/api/v2/transactions/0x1234"),
+        )
 
     def test_ensv2_registry_is_not_misreported_as_an_ensv1_nft(self):
         template = json.loads(
@@ -270,7 +313,7 @@ class ValidateTestnetBensTests(unittest.TestCase):
             "  DOS_NAMES_MAINNET_SUBGRAPH_REF: "
             "6224395661280a739c20ebd8a420913a0dd7fd6e\n"
             "  DOS_NAMES_TESTNET_SUBGRAPH_REF: "
-            "3345d09ec2cad8ebbca710b89b630c7ba04481d7"
+            "2d47fb77bb09dcbdc9d7bfeee77d12ddbebc2e4d"
         )
         self.assertIn(split_pins, workflow)
         previous_workflow = workflow.replace(
@@ -1319,7 +1362,7 @@ class ValidateTestnetBensTests(unittest.TestCase):
         self.assertIn("@bens_api path", caddy)
         self.assertIn("/api/v1/domains*", caddy)
         self.assertIn("/api/v1/addresses/*", caddy)
-        self.assertIn("reverse_proxy bens:8050", caddy)
+        self.assertIn("reverse_proxy bens-ensv2-adapter:8050", caddy)
 
     def test_renderer_rejects_wrong_chain(self):
         renderer_path = ROOT / "scripts" / "render-testnet-bens.py"

@@ -32,7 +32,7 @@
 	}
 	@bens_api path /api/v1/protocols /api/v1/domains* /api/v1/addresses:lookup /api/v1/addresses/*
 	handle @bens_api {
-		reverse_proxy bens:8050
+		reverse_proxy bens-ensv2-adapter:8050
 	}
 	handle /api/* {
 		reverse_proxy backend:4000
@@ -73,7 +73,7 @@
 		reverse_proxy visualizer:8050
 	}
 	handle_path /name-service/* {
-		reverse_proxy bens:8050
+		reverse_proxy bens-ensv2-adapter:8050
 	}
 	handle {
 		reverse_proxy frontend:3000
