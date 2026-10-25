@@ -181,7 +181,7 @@ def validate() -> list[str]:
 
     expected_backend = {
         "MICROSERVICE_BENS_ENABLED": "true",
-        "MICROSERVICE_BENS_URL": "http://bens:8050/",
+        "MICROSERVICE_BENS_URL": "http://bens-ensv2-adapter:8050/",
         "MICROSERVICE_BENS_PROTOCOLS": "dos-names",
     }
     for key, expected in expected_backend.items():
@@ -198,7 +198,7 @@ def validate() -> list[str]:
         if actual != expected:
             errors.append(f"{key} must be {expected!r}, got {actual!r}")
 
-    if "handle_path /name-service/*" not in caddy or "reverse_proxy bens:8050" not in caddy:
+    if "handle_path /name-service/*" not in caddy or "reverse_proxy bens-ensv2-adapter:8050" not in caddy:
         errors.append("Caddy must expose BENS under /name-service without route overlap")
 
     protocols = config.get("subgraphs_reader", {}).get("protocols", {})
@@ -216,8 +216,14 @@ def validate() -> list[str]:
         errors.append("BENS network 3939 must enable only dos-names")
     if networks.get("3939", {}).get("rpc_url") != CANONICAL_TESTNET_BENS_RPC:
         errors.append("BENS must use the live Testnet r1 RPC")
-    if networks.get("3939", {}).get("blockscout", {}).get("url") != "https://test.doscan.io":
-        errors.append("BENS explorer links must use the public Testnet origin")
+    if networks.get("3939", {}).get("blockscout", {}).get("url") != "http://backend:4000":
+        errors.append("BENS transaction history must keep internal backend routing")
+    if (
+        "  bens-ensv2-adapter:" not in compose
+        or "./bens/subgraph/adapter:/app:ro" not in compose
+        or "./bens/deployment.json:/app/deployment.json:ro" not in compose
+    ):
+        errors.append("Testnet must run the immutable DOS Names metadata adapter")
 
     ref_match = re.search(r"DOS_NAMES_TESTNET_SUBGRAPH_REF: ([0-9a-f]{40})", workflow)
     if ref_match is None:

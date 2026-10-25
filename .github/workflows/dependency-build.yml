@@ -53,7 +53,7 @@ env:
   ELIXIR_VERSION: "1.19.4"
   MIX_ENV: prod
   DOS_NAMES_REPOSITORY: https://github.com/DOS/DOS-Names-Contracts.git
-  DOS_NAMES_SUBGRAPH_REF: 3345d09ec2cad8ebbca710b89b630c7ba04481d7
+  DOS_NAMES_SUBGRAPH_REF: 2d47fb77bb09dcbdc9d7bfeee77d12ddbebc2e4d
   AA_SOURCE_REPOSITORY: https://github.com/eth-infinitism/account-abstraction.git
   AA_SOURCE_REF: 4cbc06072cdc19fd60f285c5997f4f7f57a588de
 
@@ -105,6 +105,7 @@ jobs:
           git -C "${checkout}" merge-base --is-ancestor \
             "${DOS_NAMES_SUBGRAPH_REF}" refs/remotes/origin/dos
           git -C "${checkout}" checkout --detach -q "${DOS_NAMES_SUBGRAPH_REF}"
+          node --test "${checkout}/subgraph/dos-names/adapter/server.test.mjs"
           cp "${checkout}/contracts/deployments/dos-testnet-3939.json" \
             docker-compose/bens/deployment.json
           node "${checkout}/subgraph/dos-names/scripts/render-manifest.mjs" \

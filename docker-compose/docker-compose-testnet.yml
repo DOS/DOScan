@@ -117,6 +117,33 @@ services:
     volumes:
       - ./bens/config.json:/app/config/dos-testnet.json:ro
 
+  bens-ensv2-adapter:
+    image: node:22.18.0-alpine3.22@sha256:1b2479dd35a99687d6638f5976fd235e26c5b37e8122f786fcd5fe231d63de5b
+    platform: linux/amd64
+    restart: unless-stopped
+    init: true
+    user: "1000:1000"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 128m
+    cpus: 0.5
+    depends_on:
+      bens:
+        condition: service_started
+      bens-graph-node:
+        condition: service_started
+    volumes:
+      - ./bens/subgraph/adapter:/app:ro
+      - ./bens/deployment.json:/app/deployment.json:ro
+    command: ["node", "/app/server.mjs"]
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8050/health').then(r=>r.json()).then(r=>process.exit(r.status==='SERVING'?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 12s
+      retries: 5
+
   bens-deployer:
     image: node:22.18.0-alpine3.22@sha256:1b2479dd35a99687d6638f5976fd235e26c5b37e8122f786fcd5fe231d63de5b
     profiles: ["bens-deploy"]

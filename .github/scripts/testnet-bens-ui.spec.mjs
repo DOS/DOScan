@@ -94,7 +94,9 @@ test("DOS Name search resolves through the Testnet UI", async ({ page }) => {
   ]);
   await tokenPage.waitForLoadState("domcontentloaded");
   await expect(tokenPage).toHaveURL(tokenUrl.toString());
-  await expect(tokenPage.getByRole("heading", { name: /NFT details/i })).toBeVisible();
+  const tokenId = tokenUrl.pathname.split("/").at(-1);
+  await expect(tokenPage.getByRole("heading").filter({ hasText: tokenId })).toBeVisible();
+  await expect(tokenPage.getByRole("heading", { name: "Page not found" })).toHaveCount(0);
   await expect(tokenPage.getByText("Oops! Something went wrong")).toHaveCount(0);
   await tokenPage.close();
 });

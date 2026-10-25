@@ -27,6 +27,12 @@
 - Existing evidence: deployment `39591240503` is live; health, lookup and search pass. Its CI browser test was skipped, not passed.
 - Investigation: the pinned DOS Names revision already includes dynamic registrar discovery from `LabelRegistered.sender`. Verify it with real policy events before changing the subgraph.
 - Next: pass URL regression tests, verify the live Testnet policy bindings and existing authorized signers, then run bounded Testnet-only acceptance and deploy the reviewed DOScan patch.
+- Approved scope extension: JOY approved a minimal read-only metadata adapter in DOS-Names-Contracts and its Testnet runtime integration. It must not hold keys or submit transactions; contracts and official BENS remain unchanged.
+- Verified NFT blocker: official BENS derives wrapped token IDs from namehash. The smoke domain's ERC-1155 ID comes from `Domain.tokenId` and differs. The adapter reads canonical subgraph state, preserves domain identity and corrects token metadata. BENS keeps its internal backend URL for transaction history; the adapter publishes the public explorer URL.
+- Claim evidence: Testnet policy emitted successful claims for the dedicated `policy-smoke` and `e2epolicy01` fixtures. No renewal event was present at this checkpoint. Do not count fixture contract tests as authenticated DOS.Me user acceptance.
+- Source adapter accepted: DOS Names PR #11 merged as `2d47fb77bb09dcbdc9d7bfeee77d12ddbebc2e4d`, with final-head independent review and successful required CI. Adapter tests cover canonical/retired tokens, subdomains, regeneration, invalid state and client-disconnect cancellation.
+- Testnet fixture renewal accepted: `0xce800d5b23a7eb1a0cf7318585af76b02e0e93e0b7ce468038ff941732c1094c` succeeded at block 299. `policy-smoke.dos` expiry changed from 1824131273 to 1855667273 (+365 days); token ID and owner were unchanged. Positive payment transfer, paidExpiry and post-renewal nonce replay rejection were verified. BENS history includes the claim and renewal receipts, and its expiry is `2028-10-20T15:07:53Z`.
+- Negative policy simulations passed for WrongWallet, InvalidVoucher, VoucherExpired, PriceExceedsVoucher, NonceAlreadyUsed and UnauthorizedRegistrationController. Only existing Testnet fixture keys were used in memory; no keys/signatures were logged or persisted. These checks do not prove DOS.Me authentication/score admission for a real user.
 
 ---
 
