@@ -37,6 +37,30 @@ class ValidateTestnetBensTests(unittest.TestCase):
     def test_repository_configuration_is_valid(self):
         self.assertEqual([], self.module.validate())
 
+    def test_adapter_manifest_mount_is_outside_read_only_code_directory(self):
+        compose = (ROOT / "docker-compose" / "docker-compose-testnet.yml").read_text(
+            encoding="utf-8"
+        )
+        match = re.search(
+            r"^  bens-ensv2-adapter:.*?(?=^  [a-zA-Z0-9_-]+:|\Z)",
+            compose,
+            re.DOTALL | re.MULTILINE,
+        )
+        self.assertIsNotNone(match, "Missing Testnet adapter service")
+        adapter = match.group(0)
+        self.assertIn("./bens/subgraph/adapter:/app:ro", adapter)
+        self.assertIn("./bens/deployment.json:/deployment.json:ro", adapter)
+        self.assertIn("DOS_NAMES_DEPLOYMENT: /deployment.json", adapter)
+        self.assertNotIn(":/app/deployment.json:ro", adapter)
+
+    def test_non_root_adapter_artifacts_have_explicit_readable_modes(self):
+        workflow = (ROOT / ".github" / "workflows" / "deploy-config.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('sudo chmod 0755 "${DEPLOY_PATH}/bens/subgraph/adapter"', workflow)
+        self.assertIn('sudo chmod 0644 "${DEPLOY_PATH}/bens/subgraph/adapter/server.mjs"', workflow)
+        self.assertIn('"${DEPLOY_PATH}/bens/deployment.json"', workflow)
+
     def test_validator_rejects_public_http_routing_for_internal_bens_history(self):
         template = json.loads(self.module.BENS_TEMPLATE.read_text(encoding="utf-8"))
         template["subgraphs_reader"]["networks"]["3939"]["blockscout"]["url"] = (

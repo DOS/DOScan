@@ -108,6 +108,33 @@ jobs:
           node --test "${checkout}/subgraph/dos-names/adapter/server.test.mjs"
           cp "${checkout}/contracts/deployments/dos-testnet-3939.json" \
             docker-compose/bens/deployment.json
+          # Exercise real read-only mounts and the production entrypoint, not just module tests.
+          chmod 0755 "${checkout}/subgraph/dos-names/adapter"
+          chmod 0644 "${checkout}/subgraph/dos-names/adapter/server.mjs" \
+            docker-compose/bens/deployment.json
+          docker run --rm --init --network none --user 1000:1000 --read-only \
+            --cap-drop ALL --security-opt no-new-privileges:true --memory 128m --cpus 0.5 \
+            --platform linux/amd64 \
+            --mount "type=bind,src=${checkout}/subgraph/dos-names/adapter,dst=/app,readonly" \
+            --mount "type=bind,src=${PWD}/docker-compose/bens/deployment.json,dst=/deployment.json,readonly" \
+            --env DOS_NAMES_DEPLOYMENT=/deployment.json \
+            node:22.18.0-alpine3.22@sha256:1b2479dd35a99687d6638f5976fd235e26c5b37e8122f786fcd5fe231d63de5b \
+            node -e '
+              const { spawn } = require("node:child_process");
+              const child = spawn(process.execPath, ["/app/server.mjs"], { stdio: ["ignore", "pipe", "inherit"] });
+              let output = "";
+              let started = false;
+              const deadline = setTimeout(() => child.kill("SIGKILL"), 5000);
+              child.stdout.on("data", (chunk) => {
+                output += chunk;
+                if (output.includes("DOS Names Testnet metadata adapter listening")) {
+                  started = true;
+                  child.kill("SIGTERM");
+                }
+              });
+              child.on("error", () => { process.exitCode = 1; });
+              child.on("close", () => { clearTimeout(deadline); process.exitCode = started ? 0 : 1; });
+            '
           node "${checkout}/subgraph/dos-names/scripts/render-manifest.mjs" \
             docker-compose/bens/deployment.json \
             "${checkout}/subgraph/dos-names/subgraph.template.yaml" \
