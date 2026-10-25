@@ -5,7 +5,7 @@
     "networks": {
       "3939": {
         "blockscout": {
-          "url": "http://backend:4000"
+          "url": "https://test.doscan.io"
         },
         "use_protocols": ["dos-names"],
         "rpc_url": "http://10.148.0.9:9650/ext/bc/JASJZyVTWR7aviy4eY5yE8AVfdXtH33c1AinvzhLcVBARhcm9/rpc"

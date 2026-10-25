@@ -10,6 +10,7 @@ import textwrap
 import threading
 import unittest
 from pathlib import Path
+from urllib.parse import urljoin
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -35,6 +36,44 @@ class ValidateTestnetBensTests(unittest.TestCase):
 
     def test_repository_configuration_is_valid(self):
         self.assertEqual([], self.module.validate())
+
+    def test_validator_rejects_an_internal_explorer_url(self):
+        template = json.loads(self.module.BENS_TEMPLATE.read_text(encoding="utf-8"))
+        template["subgraphs_reader"]["networks"]["3939"]["blockscout"]["url"] = (
+            "http://backend:4000"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.template.json"
+            path.write_text(json.dumps(template), encoding="utf-8")
+            self.module.BENS_TEMPLATE = path
+            self.assertIn(
+                "BENS explorer links must use the public Testnet origin",
+                self.module.validate(),
+            )
+
+    def test_rendered_explorer_links_are_public(self):
+        spec = importlib.util.spec_from_file_location(
+            "render_testnet_bens", ROOT / "scripts" / "render-testnet-bens.py"
+        )
+        renderer = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(renderer)
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "config.json"
+            renderer.render_config(
+                self.module.BENS_TEMPLATE,
+                output,
+                {
+                    "contracts": {
+                        "rootRegistry": "0x1111111111111111111111111111111111111111"
+                    }
+                },
+            )
+            config = json.loads(output.read_text(encoding="utf-8"))
+        base = config["subgraphs_reader"]["networks"]["3939"]["blockscout"]["url"]
+        self.assertEqual(
+            "https://test.doscan.io/token/0x2222222222222222222222222222222222222222/instance/123",
+            urljoin(base, "/token/0x2222222222222222222222222222222222222222/instance/123"),
+        )
 
     def test_ensv2_registry_is_not_misreported_as_an_ensv1_nft(self):
         template = json.loads(

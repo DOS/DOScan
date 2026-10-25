@@ -216,6 +216,8 @@ def validate() -> list[str]:
         errors.append("BENS network 3939 must enable only dos-names")
     if networks.get("3939", {}).get("rpc_url") != CANONICAL_TESTNET_BENS_RPC:
         errors.append("BENS must use the live Testnet r1 RPC")
+    if networks.get("3939", {}).get("blockscout", {}).get("url") != "https://test.doscan.io":
+        errors.append("BENS explorer links must use the public Testnet origin")
 
     ref_match = re.search(r"DOS_NAMES_TESTNET_SUBGRAPH_REF: ([0-9a-f]{40})", workflow)
     if ref_match is None:

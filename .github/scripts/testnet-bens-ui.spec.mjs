@@ -82,4 +82,19 @@ test("DOS Name search resolves through the Testnet UI", async ({ page }) => {
   ).toBeVisible({ timeout: 30_000 });
   await expect(page.getByText(smokeName, { exact: true }).first()).toBeVisible();
   await expect(page.getByText("Oops! Something went wrong")).toHaveCount(0);
+
+  const tokenLink = page.locator('a[href*="/token/"][href*="/instance/"]').first();
+  await expect(tokenLink).toBeVisible();
+  const tokenUrl = new URL(await tokenLink.getAttribute("href"), baseUrl);
+  expect(tokenUrl.origin).toBe(new URL(baseUrl).origin);
+  expect(tokenUrl.protocol).toBe("https:");
+  const [tokenPage] = await Promise.all([
+    page.waitForEvent("popup"),
+    tokenLink.click(),
+  ]);
+  await tokenPage.waitForLoadState("domcontentloaded");
+  await expect(tokenPage).toHaveURL(tokenUrl.toString());
+  await expect(tokenPage.getByRole("heading", { name: /NFT details/i })).toBeVisible();
+  await expect(tokenPage.getByText("Oops! Something went wrong")).toHaveCount(0);
+  await tokenPage.close();
 });

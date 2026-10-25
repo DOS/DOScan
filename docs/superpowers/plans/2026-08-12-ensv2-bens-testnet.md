@@ -18,6 +18,16 @@
 - No secret is committed or printed.
 - DOS-Chain is read-only.
 
+## Testnet Acceptance Follow-up - 2026-10-25
+
+- Owner: this DOScan task, branch `codex/testnet-nft-policy-acceptance`.
+- Authorized outcome: fix public NFT links and finish policy-registrar claim/renew verification on Testnet only. No Mainnet deployment or configuration change.
+- Acceptance: generated NFT URLs use `https://test.doscan.io`; the browser opens the NFT detail page; successful policy claim and paid renewal preserve ownership/token identity and extend expiry; invalid authorization and replay fail; registrar metadata is visible through the deployed subgraph/BENS.
+- Scope: DOScan BENS Testnet config, validators, acceptance tests and this record. DOS Names and DOS-Me remain read-only unless their required changes receive explicit repository authority.
+- Existing evidence: deployment `39591240503` is live; health, lookup and search pass. Its CI browser test was skipped, not passed.
+- Investigation: the pinned DOS Names revision already includes dynamic registrar discovery from `LabelRegistered.sender`. Verify it with real policy events before changing the subgraph.
+- Next: pass URL regression tests, verify the live Testnet policy bindings and existing authorized signers, then run bounded Testnet-only acceptance and deploy the reviewed DOScan patch.
+
 ---
 
 ### Task 1: Establish the DOS Names Subgraph Package
