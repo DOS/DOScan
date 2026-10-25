@@ -1532,6 +1532,9 @@ jobs:
               sudo cp -a "${SRC}/docker-compose/bens" "${DEPLOY_PATH}/bens"
               sudo chmod 0755 "${DEPLOY_PATH}/bens"
               sudo chmod 0644 "${DEPLOY_PATH}/bens/config.json"
+              sudo chmod 0755 "${DEPLOY_PATH}/bens/subgraph/adapter"
+              sudo chmod 0644 "${DEPLOY_PATH}/bens/subgraph/adapter/server.mjs" \
+                "${DEPLOY_PATH}/bens/deployment.json"
 
               cd "${DEPLOY_PATH}"
               sudo env DOSCAN_BLOCKSCOUT_SECRETS_ENV="${SECRETS_ENV}" docker compose config -q

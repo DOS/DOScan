@@ -109,6 +109,9 @@ jobs:
           cp "${checkout}/contracts/deployments/dos-testnet-3939.json" \
             docker-compose/bens/deployment.json
           # Exercise real read-only mounts and the production entrypoint, not just module tests.
+          chmod 0755 "${checkout}/subgraph/dos-names/adapter"
+          chmod 0644 "${checkout}/subgraph/dos-names/adapter/server.mjs" \
+            docker-compose/bens/deployment.json
           docker run --rm --init --network none --user 1000:1000 --read-only \
             --cap-drop ALL --security-opt no-new-privileges:true --memory 128m --cpus 0.5 \
             --platform linux/amd64 \

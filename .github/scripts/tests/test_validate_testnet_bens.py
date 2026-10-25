@@ -49,6 +49,14 @@ class ValidateTestnetBensTests(unittest.TestCase):
         self.assertIn("DOS_NAMES_DEPLOYMENT: /deployment.json", adapter)
         self.assertNotIn(":/app/deployment.json:ro", adapter)
 
+    def test_non_root_adapter_artifacts_have_explicit_readable_modes(self):
+        workflow = (ROOT / ".github" / "workflows" / "deploy-config.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('sudo chmod 0755 "${DEPLOY_PATH}/bens/subgraph/adapter"', workflow)
+        self.assertIn('sudo chmod 0644 "${DEPLOY_PATH}/bens/subgraph/adapter/server.mjs"', workflow)
+        self.assertIn('"${DEPLOY_PATH}/bens/deployment.json"', workflow)
+
     def test_validator_rejects_public_http_routing_for_internal_bens_history(self):
         template = json.loads(self.module.BENS_TEMPLATE.read_text(encoding="utf-8"))
         template["subgraphs_reader"]["networks"]["3939"]["blockscout"]["url"] = (
