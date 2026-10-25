@@ -37,6 +37,15 @@ class ValidateTestnetBensTests(unittest.TestCase):
     def test_repository_configuration_is_valid(self):
         self.assertEqual([], self.module.validate())
 
+    def test_browser_nft_guard_accepts_same_tab_and_popup_navigation(self):
+        spec = (ROOT / ".github" / "scripts" / "testnet-bens-ui.spec.mjs").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('await tokenLink.getAttribute("target")', spec)
+        self.assertIn('if (tokenTarget === "_blank")', spec)
+        self.assertIn("let tokenPage = page;", spec)
+        self.assertIn("if (tokenPage !== page)", spec)
+
     def test_adapter_manifest_mount_is_outside_read_only_code_directory(self):
         compose = (ROOT / "docker-compose" / "docker-compose-testnet.yml").read_text(
             encoding="utf-8"
