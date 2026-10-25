@@ -129,6 +129,8 @@ services:
       - no-new-privileges:true
     mem_limit: 128m
     cpus: 0.5
+    environment:
+      DOS_NAMES_DEPLOYMENT: /deployment.json
     depends_on:
       bens:
         condition: service_started
@@ -136,7 +138,7 @@ services:
         condition: service_started
     volumes:
       - ./bens/subgraph/adapter:/app:ro
-      - ./bens/deployment.json:/app/deployment.json:ro
+      - ./bens/deployment.json:/deployment.json:ro
     command: ["node", "/app/server.mjs"]
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8050/health').then(r=>r.json()).then(r=>process.exit(r.status==='SERVING'?0:1)).catch(()=>process.exit(1))"]

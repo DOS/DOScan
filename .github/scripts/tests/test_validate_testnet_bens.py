@@ -37,6 +37,18 @@ class ValidateTestnetBensTests(unittest.TestCase):
     def test_repository_configuration_is_valid(self):
         self.assertEqual([], self.module.validate())
 
+    def test_adapter_manifest_mount_is_outside_read_only_code_directory(self):
+        compose = (ROOT / "docker-compose" / "docker-compose-testnet.yml").read_text(
+            encoding="utf-8"
+        )
+        adapter = compose.split("  bens-ensv2-adapter:", 1)[1].split(
+            "  bens-deployer:", 1
+        )[0]
+        self.assertIn("./bens/subgraph/adapter:/app:ro", adapter)
+        self.assertIn("./bens/deployment.json:/deployment.json:ro", adapter)
+        self.assertIn("DOS_NAMES_DEPLOYMENT: /deployment.json", adapter)
+        self.assertNotIn(":/app/deployment.json:ro", adapter)
+
     def test_validator_rejects_public_http_routing_for_internal_bens_history(self):
         template = json.loads(self.module.BENS_TEMPLATE.read_text(encoding="utf-8"))
         template["subgraphs_reader"]["networks"]["3939"]["blockscout"]["url"] = (

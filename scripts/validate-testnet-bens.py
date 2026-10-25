@@ -221,7 +221,8 @@ def validate() -> list[str]:
     if (
         "  bens-ensv2-adapter:" not in compose
         or "./bens/subgraph/adapter:/app:ro" not in compose
-        or "./bens/deployment.json:/app/deployment.json:ro" not in compose
+        or "./bens/deployment.json:/deployment.json:ro" not in compose
+        or "DOS_NAMES_DEPLOYMENT: /deployment.json" not in compose
     ):
         errors.append("Testnet must run the immutable DOS Names metadata adapter")
 
