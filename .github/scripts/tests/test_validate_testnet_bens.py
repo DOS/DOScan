@@ -41,9 +41,13 @@ class ValidateTestnetBensTests(unittest.TestCase):
         compose = (ROOT / "docker-compose" / "docker-compose-testnet.yml").read_text(
             encoding="utf-8"
         )
-        adapter = compose.split("  bens-ensv2-adapter:", 1)[1].split(
-            "  bens-deployer:", 1
-        )[0]
+        match = re.search(
+            r"^  bens-ensv2-adapter:.*?(?=^  [a-zA-Z0-9_-]+:|\Z)",
+            compose,
+            re.DOTALL | re.MULTILINE,
+        )
+        self.assertIsNotNone(match, "Missing Testnet adapter service")
+        adapter = match.group(0)
         self.assertIn("./bens/subgraph/adapter:/app:ro", adapter)
         self.assertIn("./bens/deployment.json:/deployment.json:ro", adapter)
         self.assertIn("DOS_NAMES_DEPLOYMENT: /deployment.json", adapter)
