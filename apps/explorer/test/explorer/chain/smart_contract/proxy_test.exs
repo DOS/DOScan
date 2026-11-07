@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: LicenseRef-Blockscout
 defmodule Explorer.Chain.SmartContract.ProxyTest do
   use Explorer.DataCase, async: false
+  import ExUnit.CaptureLog
   import Mox
   alias Explorer.Chain.Hash
   alias Explorer.Chain.SmartContract
@@ -303,6 +304,141 @@ defmodule Explorer.Chain.SmartContract.ProxyTest do
     verify!(EthereumJSONRPC.Mox)
 
     assert implementation_abi == @implementation_abi
+  end
+
+  describe "fetch_value/2 and fetch_values/2" do
+    setup do
+      address = insert(:address)
+      %{address: address}
+    end
+
+    test "returns nil when eth_call reverts", %{address: address} do
+      expect(EthereumJSONRPC.Mox, :json_rpc, fn _, _ ->
+        {:error, "execution reverted"}
+      end)
+
+      assert Proxy.fetch_value({:call, "0x5c60da1b"}, address.hash) == {:ok, nil}
+    end
+
+    test "returns error when eth_call fails with a non-revert error", %{address: address} do
+      expect(EthereumJSONRPC.Mox, :json_rpc, fn _, _ ->
+        {:error, :timeout}
+      end)
+
+      assert Proxy.fetch_value({:call, "0x5c60da1b"}, address.hash) == :error
+    end
+
+    test "returns error when batched eth_call fails with a non-revert error", %{address: address} do
+      expect(EthereumJSONRPC.Mox, :json_rpc, fn _, _ ->
+        {:ok, [%{id: 0, error: "timeout"}]}
+      end)
+
+      assert Proxy.fetch_values([{:call, "0x5c60da1b"}], address.hash) == :error
+    end
+
+    test "returns nil for reverted batched eth_call", %{address: address} do
+      expect(EthereumJSONRPC.Mox, :json_rpc, fn _, _ ->
+        {:ok, [%{id: 0, error: %{code: 3, message: "execution reverted"}}]}
+      end)
+
+      assert Proxy.fetch_values([{:call, "0x5c60da1b"}], address.hash) ==
+               {:ok, %{{:call, "0x5c60da1b"} => nil}}
+    end
+
+    test "returns nil when eth_call reverts with a capitalized message (Besu)", %{address: address} do
+      expect(EthereumJSONRPC.Mox, :json_rpc, fn _, _ ->
+        {:error, %{code: -32000, message: "Execution reverted"}}
+      end)
+
+      assert Proxy.fetch_value({:call, "0x5c60da1b"}, address.hash) == {:ok, nil}
+    end
+
+    test "returns nil when eth_call reverts with the standard revert error code", %{address: address} do
+      expect(EthereumJSONRPC.Mox, :json_rpc, fn _, _ ->
+        {:error, %{code: 3, message: "Reverted", data: "0x08c379a0"}}
+      end)
+
+      assert Proxy.fetch_value({:call, "0x5c60da1b"}, address.hash) == {:ok, nil}
+    end
+
+    test "returns nil when eth_call reverts with a Frontier-style message", %{address: address} do
+      expect(EthereumJSONRPC.Mox, :json_rpc, fn _, _ ->
+        {:error, %{code: -32603, message: "VM Exception while processing transaction: revert", data: "0x"}}
+      end)
+
+      assert Proxy.fetch_value({:call, "0x5c60da1b"}, address.hash) == {:ok, nil}
+    end
+
+    test "returns nil when eth_call reverts with a Nethermind-style message", %{address: address} do
+      expect(EthereumJSONRPC.Mox, :json_rpc, fn _, _ ->
+        {:error, %{code: -32015, message: "VM execution error.", data: "Reverted 0x"}}
+      end)
+
+      assert Proxy.fetch_value({:call, "0x5c60da1b"}, address.hash) == {:ok, nil}
+    end
+
+    test "keeps storage values when a batched eth_call reverts with a Frontier-style message", %{address: address} do
+      storage_req = {:storage, "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc"}
+      call_req = {:call, "0x5c60da1b"}
+      implementation = "0x000000000000000000000000fe69297fa372d6b480ad75863784d9254bc74099"
+
+      expect(EthereumJSONRPC.Mox, :json_rpc, fn requests, _ ->
+        responses =
+          Enum.map(requests, fn
+            %{id: id, method: "eth_getStorageAt"} ->
+              %{id: id, result: implementation}
+
+            %{id: id, method: "eth_call"} ->
+              %{
+                id: id,
+                error: %{code: -32603, message: "VM Exception while processing transaction: revert", data: "0x"}
+              }
+          end)
+
+        {:ok, responses}
+      end)
+
+      assert Proxy.fetch_values([storage_req, call_req], address.hash) ==
+               {:ok, %{storage_req => implementation, call_req => nil}}
+    end
+
+    test "returns nil when a single-call IPC error with string keys is a revert", %{address: address} do
+      # the IPC transport passes single-call errors through as raw decoded JSON
+      expect(EthereumJSONRPC.Mox, :json_rpc, fn _, _ ->
+        {:error, %{"code" => -32603, "message" => "VM Exception while processing transaction: revert", "data" => "0x"}}
+      end)
+
+      assert Proxy.fetch_value({:call, "0x5c60da1b"}, address.hash) == {:ok, nil}
+
+      expect(EthereumJSONRPC.Mox, :json_rpc, fn _, _ ->
+        {:error, %{"code" => 3, "message" => "Reverted", "data" => "0x08c379a0"}}
+      end)
+
+      assert Proxy.fetch_value({:call, "0x5c60da1b"}, address.hash) == {:ok, nil}
+    end
+
+    test "returns error for a transport error even if the RPC URL contains a revert marker", %{address: address} do
+      expect(EthereumJSONRPC.Mox, :json_rpc, fn _, _ ->
+        {:error, {:bad_gateway, "https://revert-rpc.example.com/v1/secret-api-key"}}
+      end)
+
+      log =
+        capture_log(fn ->
+          assert Proxy.fetch_value({:call, "0x5c60da1b"}, address.hash) == :error
+        end)
+
+      assert log =~ "Proxy implementation detection aborted"
+      assert log =~ "bad_gateway"
+      refute log =~ "secret-api-key"
+    end
+
+    test "returns error when eth_call fails with a non-binary error message", %{address: address} do
+      expect(EthereumJSONRPC.Mox, :json_rpc, fn _, _ ->
+        {:error, %{message: {:closed, :timeout}}}
+      end)
+
+      assert Proxy.fetch_value({:call, "0x5c60da1b"}, address.hash) == :error
+    end
   end
 
   test "extract_address_hash/1" do
