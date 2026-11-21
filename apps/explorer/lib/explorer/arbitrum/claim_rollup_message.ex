@@ -88,7 +88,6 @@ defmodule Explorer.Arbitrum.ClaimRollupMessage do
     - `{:error, :not_found}` if either:
       * the message with the given ID cannot be found in the database
       * the associated L2ToL1Tx event log cannot be found
-    - `{:error, :initiated}` if the message is not yet confirmed
     - `{:error, :sent}` if the message is not yet confirmed
     - `{:error, :relayed}` if the message has already been claimed
     - `{:error, :internal_error}` if the message status is unknown
@@ -122,13 +121,12 @@ defmodule Explorer.Arbitrum.ClaimRollupMessage do
   # - `{:error, :not_found}` if either:
   #   * the associated L2ToL1Tx event log cannot be found
   #   * the withdrawal cannot be found in the transaction logs
-  # - `{:error, :initiated}` if the message is not yet confirmed
   # - `{:error, :sent}` if the message is not yet confirmed
   # - `{:error, :relayed}` if the message has already been claimed
   # - `{:error, :internal_error}` if the message status is unknown
   @spec claim_message(Explorer.Chain.Arbitrum.Message.t()) ::
           {:ok, list({:contract_address, binary()} | {:calldata, binary()})}
-          | {:error, :initiated | :sent | :relayed | :internal_error}
+          | {:error, :not_found | :sent | :relayed | :internal_error}
   defp claim_message(message) do
     # request associated log from the database
     case message.originating_transaction_hash
@@ -149,9 +147,6 @@ defmodule Explorer.Arbitrum.ClaimRollupMessage do
 
           withdrawal when withdrawal.status == :confirmed ->
             construct_claim(withdrawal)
-
-          w when w.status == :initiated ->
-            {:error, :initiated}
 
           w when w.status == :sent ->
             {:error, :sent}
@@ -387,8 +382,8 @@ defmodule Explorer.Arbitrum.ClaimRollupMessage do
   #   call of a smart contract on L1)
   @spec obtain_token_withdrawal_data(binary()) ::
           %{
-            address_hash: Explorer.Chain.Hash.Address.t() | nil,
-            destination_address_hash: Explorer.Chain.Hash.Address.t() | nil,
+            address_hash: Explorer.Chain.Hash.Address.t(),
+            destination_address_hash: Explorer.Chain.Hash.Address.t(),
             amount: non_neg_integer(),
             decimals: non_neg_integer() | nil,
             name: binary() | nil,
@@ -398,24 +393,16 @@ defmodule Explorer.Arbitrum.ClaimRollupMessage do
   defp obtain_token_withdrawal_data(<<0x2E567B36::32, rest_data::binary>>) do
     [token, _, to, amount, _] = ABI.decode(ArbitrumContracts.finalize_inbound_transfer_selector_with_abi(), rest_data)
 
-    token_bin =
-      case Address.cast(token) do
-        {:ok, address} -> address
-        _ -> nil
-      end
-
-    to_bin =
-      case Address.cast(to) do
-        {:ok, address} -> address
-        _ -> nil
-      end
+    # ABI decoding of the `address` type always yields 20 bytes, which `Address.cast/1` accepts
+    {:ok, token_bin} = Address.cast(token)
+    {:ok, to_bin} = Address.cast(to)
 
     # getting L1 RPC
     json_l1_rpc_named_arguments = get_json_rpc(:l1)
 
     # getting additional token properties needed to display purposes
     # TODO: it's need to cache token_info (e.g. with Explorer.Chain.OrderedCache) to reduce requests number
-    token_info = ERC20.fetch_token_properties(ArbitrumRpc.value_to_address(token), json_l1_rpc_named_arguments)
+    token_info = ERC20.fetch_token_properties(to_string(token_bin), json_l1_rpc_named_arguments)
 
     %{
       address_hash: token_bin,
