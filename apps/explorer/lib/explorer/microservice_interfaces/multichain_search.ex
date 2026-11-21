@@ -16,6 +16,9 @@ defmodule Explorer.MicroserviceInterfaces.MultichainSearch do
     TokenInfoExportQueue
   }
 
+  import Explorer.Chain.SmartContract.Proxy.Models.Implementation,
+    only: [proxy_implementations_smart_contracts_association: 0]
+
   alias Explorer.{Helper, HttpClient, Repo}
   alias Explorer.Utility.Microservice
 
@@ -563,6 +566,10 @@ defmodule Explorer.MicroserviceInterfaces.MultichainSearch do
       - `:blocks` - List of block data.
       - `:transactions` - List of transaction data.
       - `:address_current_token_balances` - List of address token balance data.
+      - `:address_coin_balances` (optional) - List of `%{address_hash: Hash.Address.t(), value: Wei.t()}`
+        coin balances to export. When the key is absent, a current coin balance row is derived from
+        every entry of `:addresses`, so callers whose addresses were merely touched (and whose
+        balances did not change) should pass the list explicitly, possibly empty.
 
   ## Returns
 
@@ -618,11 +625,14 @@ defmodule Explorer.MicroserviceInterfaces.MultichainSearch do
     - A map containing token type and its metadata in the format approved on Multichain service.
   """
   @spec prepare_token_metadata_for_queue(Token.t(), %{
-          :token_type => String.t(),
+          optional(:type) => String.t(),
           optional(:name) => String.t(),
           optional(:symbol) => String.t(),
           optional(:decimals) => non_neg_integer(),
           optional(:total_supply) => non_neg_integer(),
+          optional(:ui_multiplier) => non_neg_integer() | Decimal.t(),
+          optional(:new_ui_multiplier) => non_neg_integer() | Decimal.t(),
+          optional(:ui_multiplier_effective_at) => DateTime.t(),
           optional(any()) => any()
         }) :: %{
           optional(:token_type) => String.t(),
@@ -630,20 +640,86 @@ defmodule Explorer.MicroserviceInterfaces.MultichainSearch do
           optional(:symbol) => String.t(),
           optional(:decimals) => String.t(),
           optional(:total_supply) => String.t(),
-          optional(:icon_url) => String.t()
+          optional(:icon_url) => String.t(),
+          optional(:ui_multiplier) => String.t(),
+          optional(:new_ui_multiplier) => String.t(),
+          optional(:ui_multiplier_effective_at) => String.t()
         }
   def prepare_token_metadata_for_queue(%Token{} = token, metadata) do
     if enabled?() do
-      %{token_type: token.type}
+      # the metadata fetched from the contract may carry a type more recent than the
+      # one stored in the token row (e.g. an ERC-20 token just found to implement ERC-8056)
+      token_type = Map.get(metadata, :type) || token.type
+
+      %{token_type: token_type}
       |> token_optional_field(metadata, :name)
       |> token_optional_field(metadata, :symbol)
       |> token_optional_field(token, :icon_url)
       |> token_optional_field(metadata, :decimals)
       |> token_optional_field(metadata, :total_supply, true)
+      |> put_ui_multiplier_fields(token, metadata, token_type)
     else
       %{}
     end
   end
+
+  @doc """
+    Prepares token metadata for writing to database queue and subsequent sending to Multichain service,
+    taking all the metadata from the token row itself.
+
+    Used when the token row has just been refreshed (e.g. after an ERC-8056 multiplier change) and
+    the whole metadata entry should be re-sent to the Multichain service.
+
+    ## Parameters
+    - `token`: The token to prepare metadata for.
+
+    ## Returns
+    - A map containing the token metadata in the format approved on Multichain service.
+  """
+  @spec prepare_token_metadata_for_queue(Token.t()) :: map()
+  def prepare_token_metadata_for_queue(%Token{} = token) do
+    metadata =
+      %{}
+      |> token_optional_field(token, :name)
+      |> token_optional_field(token, :symbol)
+      |> put_token_decimal_field(:decimals, token.decimals, &Decimal.to_integer/1)
+      |> put_token_decimal_field(:total_supply, token.total_supply, &Decimal.to_string(&1, :normal))
+
+    prepare_token_metadata_for_queue(token, metadata)
+  end
+
+  # `decimals` and `total_supply` are decimals in the token row but come as integers from the
+  # contract, so they are brought to the shape `prepare_token_metadata_for_queue/2` expects
+  defp put_token_decimal_field(metadata, _key, nil, _convert), do: metadata
+
+  defp put_token_decimal_field(metadata, key, %Decimal{} = value, convert),
+    do: Map.put(metadata, key, convert.(value))
+
+  # ERC-8056 multiplier fields are sent only with ERC-8056 tokens. Values are taken from the
+  # freshly fetched metadata first and fall back to the token row.
+  defp put_ui_multiplier_fields(data, token, metadata, "ERC-8056") do
+    data
+    |> put_ui_multiplier_field(token, metadata, :ui_multiplier)
+    |> put_ui_multiplier_field(token, metadata, :new_ui_multiplier)
+    |> put_ui_multiplier_field(token, metadata, :ui_multiplier_effective_at)
+  end
+
+  defp put_ui_multiplier_fields(data, _token, _metadata, _token_type), do: data
+
+  defp put_ui_multiplier_field(data, token, metadata, key) do
+    case Map.get(metadata, key) || Map.get(token, key) do
+      nil -> data
+      value -> Map.put(data, key, ui_multiplier_field_to_string(value))
+    end
+  end
+
+  # `effectiveAt()` is a Unix timestamp in seconds, so the microseconds the token row stores
+  # carry no information and are dropped to keep the format the same on every export path
+  defp ui_multiplier_field_to_string(%DateTime{} = value),
+    do: value |> DateTime.truncate(:second) |> DateTime.to_iso8601()
+
+  defp ui_multiplier_field_to_string(%Decimal{} = value), do: Decimal.to_string(value, :normal)
+  defp ui_multiplier_field_to_string(value) when is_integer(value), do: Integer.to_string(value)
 
   @doc """
     Prepares token total supply for writing to database queue and subsequent sending to Multichain service.
@@ -909,7 +985,12 @@ defmodule Explorer.MicroserviceInterfaces.MultichainSearch do
         }
       end)
 
-    main_queue = Enum.sort_by(hashes_to_queue ++ addresses_to_queue, &{&1.hash, &1.hash_type})
+    # `ON CONFLICT DO UPDATE` fails with a cardinality violation if one `insert_all`
+    # statement carries two rows with the same conflict key, so dedupe on it here.
+    main_queue =
+      (hashes_to_queue ++ addresses_to_queue)
+      |> Enum.sort_by(&{&1.hash, &1.hash_type})
+      |> Enum.uniq_by(&{&1.hash, &1.hash_type})
 
     balances_queue = compose_balances_queue(address_coin_balances, address_token_balances)
 
@@ -954,22 +1035,24 @@ defmodule Explorer.MicroserviceInterfaces.MultichainSearch do
         }
       end)
 
-    Enum.sort_by(
-      coin_balances_queue ++ token_balances_queue,
-      &{&1.address_hash, &1.token_contract_address_hash_or_native, &1[:token_id]}
-    )
+    # Conflict target of the balances queue is
+    # `(address_hash, token_contract_address_hash_or_native, COALESCE(token_id, -1))`;
+    # duplicates within one `insert_all` would raise a cardinality violation.
+    (coin_balances_queue ++ token_balances_queue)
+    |> Enum.sort_by(&{&1.address_hash, &1.token_contract_address_hash_or_native, &1[:token_id]})
+    |> Enum.uniq_by(&{&1.address_hash, &1.token_contract_address_hash_or_native, &1[:token_id]})
   end
 
   @spec http_post_request(String.t(), map()) :: {:ok, any()} | {:error, String.t()}
   defp http_post_request(url, body) do
     headers = [{"Content-Type", "application/json"}]
 
-    case HttpClient.post(url, Jason.encode!(body), headers,
+    case HttpClient.post(url, Utils.JSON.encode!(body), headers,
            recv_timeout: @post_timeout,
            pool: false
          ) do
       {:ok, %{body: response_body, status_code: 200}} ->
-        response_body |> Jason.decode()
+        response_body |> Utils.JSON.decode()
 
       {:ok, %{body: response_body, status_code: status_code}} ->
         {:error,
@@ -1028,9 +1111,41 @@ defmodule Explorer.MicroserviceInterfaces.MultichainSearch do
     {addresses, coin_balances_from_addresses_list} =
       params
       |> Map.get(:addresses, [])
-      |> Repo.preload([:token, :smart_contract])
+      |> Repo.preload([:token, :smart_contract, proxy_implementations_smart_contracts_association()])
       |> Enum.reduce({[], []}, fn address, {acc_addresses, acc_coin_balances} ->
-        {[format_address(address) | acc_addresses], [format_address_coin_balance(address) | acc_coin_balances]}
+        proxy_implementations = address.proxy_implementations
+
+        implementations =
+          if proxy_implementations do
+            not_verified_implementations =
+              proxy_implementations.address_hashes
+              |> Enum.zip(proxy_implementations.names)
+              |> Enum.reject(fn {address_hash, _name} ->
+                # credo:disable-for-lines:2 Credo.Check.Refactor.Nesting
+                Enum.any?(proxy_implementations.smart_contracts, fn smart_contract ->
+                  smart_contract.address_hash == address_hash
+                end)
+              end)
+              |> Enum.map(fn {address_hash, name} ->
+                %{
+                  hash: address_hash,
+                  name: name
+                }
+              end)
+
+            verified_formatted_implementations =
+              proxy_implementations.smart_contracts |> Enum.map(&format_smart_contract/1)
+
+            not_verified_formatted_implementations =
+              not_verified_implementations |> Enum.map(&format_not_verified_implementation/1)
+
+            verified_formatted_implementations ++ not_verified_formatted_implementations
+          else
+            []
+          end
+
+        {[format_address(address) | implementations ++ acc_addresses],
+         [format_address_coin_balance(address) | acc_coin_balances]}
       end)
 
     address_coin_balances =
@@ -1056,18 +1171,21 @@ defmodule Explorer.MicroserviceInterfaces.MultichainSearch do
 
     block_transaction_hashes = block_hashes ++ transaction_hashes
 
+    # Dedupe by hash only: the same address can arrive several times with different
+    # non-key fields (e.g. coin balance read at different moments), and duplicates would
+    # later violate the export queues' unique constraints within a single `insert_all`.
     indexed_addresses_chunks =
       addresses
       |> Enum.sort_by(& &1.hash)
-      |> Enum.uniq()
+      |> Enum.uniq_by(& &1.hash)
       |> Enum.chunk_every(addresses_chunk_size())
       |> Enum.with_index()
 
     indexed_address_coin_balances_chunks =
       address_coin_balances
-      |> Enum.sort_by(& &1.address_hash)
-      |> Enum.uniq()
       |> Enum.reject(&is_nil(&1.value))
+      |> Enum.sort_by(& &1.address_hash)
+      |> Enum.uniq_by(& &1.address_hash)
       |> Enum.chunk_every(addresses_chunk_size())
       |> Enum.with_index()
 
@@ -1189,6 +1307,24 @@ defmodule Explorer.MicroserviceInterfaces.MultichainSearch do
     }
   end
 
+  defp format_smart_contract(smart_contract) do
+    %{
+      hash: Hash.to_string(smart_contract.address_hash),
+      is_contract: true,
+      is_verified_contract: true,
+      contract_name: get_smart_contract_name(smart_contract)
+    }
+  end
+
+  defp format_not_verified_implementation(address) do
+    %{
+      hash: Hash.to_string(address[:hash]),
+      is_contract: true,
+      is_verified_contract: false,
+      contract_name: get_smart_contract_name(address)
+    }
+  end
+
   defp format_address_coin_balance(address) do
     %{
       address_hash: Hash.to_string(address.hash),
@@ -1255,7 +1391,9 @@ defmodule Explorer.MicroserviceInterfaces.MultichainSearch do
 
   defp get_smart_contract_name(%NotLoaded{}), do: nil
 
-  defp get_smart_contract_name(smart_contract), do: smart_contract.name
+  defp get_smart_contract_name(smart_contract) when is_struct(smart_contract), do: smart_contract.name
+
+  defp get_smart_contract_name(smart_contract), do: smart_contract[:name]
 
   defp get_block_ranges([]), do: []
 
