@@ -422,6 +422,15 @@ class MainnetBensConfigurationTests(unittest.TestCase):
             runtime.count('sudo docker volume inspect "${volume}"'), 2
         )
 
+    def test_deploy_jobs_with_playwright_pin_ubuntu_24_04(self):
+        workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+        for job_name in ("deploy-mainnet", "deploy-testnet"):
+            self.assertEqual(
+                workflow["jobs"][job_name]["runs-on"],
+                "ubuntu-24.04",
+                f"{job_name} installs Playwright 1.55.0 and must pin ubuntu-24.04",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
