@@ -3,12 +3,8 @@ FROM hexpm/elixir:1.20.5-erlang-29.1.2-alpine-3.24.3 AS builder-deps
 WORKDIR /app
 
 RUN apk --no-cache --update add \
-<<<<<<< HEAD
-    alpine-sdk gmp-dev automake libtool inotify-tools autoconf python3 file gcompat libstdc++ curl ca-certificates git make bash ffmpeg-dev
-=======
     alpine-sdk gmp-dev automake libtool inotify-tools autoconf python3 file gcompat libstdc++ curl ca-certificates git make bash \
     ffmpeg-dev pkgconfig
->>>>>>> v12.1.0
 
 # Cache elixir deps
 COPY mix.exs mix.lock ./
@@ -63,11 +59,7 @@ ARG BLOCKSCOUT_GROUP=blockscout
 ARG BLOCKSCOUT_UID=10001
 ARG BLOCKSCOUT_GID=10001
 
-<<<<<<< HEAD
-RUN apk --no-cache --update add jq curl ffmpeg-libs && \
-=======
 RUN apk --no-cache --update add jq curl ffmpeg && \
->>>>>>> v12.1.0
     addgroup --system --gid ${BLOCKSCOUT_GID} ${BLOCKSCOUT_GROUP} && \
     adduser --system --uid ${BLOCKSCOUT_UID} --ingroup ${BLOCKSCOUT_GROUP} --disabled-password --home /app ${BLOCKSCOUT_USER}
 

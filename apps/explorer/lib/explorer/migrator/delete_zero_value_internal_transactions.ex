@@ -18,6 +18,7 @@ defmodule Explorer.Migrator.DeleteZeroValueInternalTransactions do
   alias Timex.Duration
 
   @migration_name "delete_zero_value_internal_transactions"
+  @shrink_internal_transactions_migration_name "shrink_internal_transactions"
   @not_completed_check_interval 10
   @default_check_interval :timer.minutes(1)
   @default_batch_size 100
@@ -41,22 +42,13 @@ defmodule Explorer.Migrator.DeleteZeroValueInternalTransactions do
   end
 
   @impl true
-  def handle_continue(:ok, _state) do
-    state =
-      case MigrationStatus.fetch(@migration_name) do
-        nil ->
-          state = %{"max_block_number" => -1}
-          MigrationStatus.set_status(@migration_name, "started")
-          MigrationStatus.update_meta(@migration_name, state)
-          state
+  def handle_continue(:ok, state) do
+    check_dependency_and_start(state)
+  end
 
-        %{meta: meta} ->
-          meta
-      end
-
-    schedule_check()
-
-    {:noreply, state}
+  @impl true
+  def handle_info(:check_dependency, state) do
+    check_dependency_and_start(state)
   end
 
   @impl true
@@ -80,8 +72,6 @@ defmodule Explorer.Migrator.DeleteZeroValueInternalTransactions do
     {:noreply, new_state}
   end
 
-<<<<<<< HEAD
-=======
   defp check_dependency_and_start(state) do
     shrink_config = Application.get_env(:explorer, Explorer.Migrator.ShrinkInternalTransactions) || []
     shrink_enabled? = shrink_config[:enabled] != false
@@ -114,7 +104,6 @@ defmodule Explorer.Migrator.DeleteZeroValueInternalTransactions do
 
   # The range is inclusive on both ends, so it may consist of a single block: this happens
   # when the previous batch ended exactly one block below the border block.
->>>>>>> v12.1.0
   defp clear_internal_transactions(from_number, to_number)
        when is_integer(from_number) and is_integer(to_number) and from_number <= to_number do
     dynamic_condition = dynamic([it], it.block_number >= ^from_number and it.block_number <= ^to_number)
@@ -226,6 +215,11 @@ defmodule Explorer.Migrator.DeleteZeroValueInternalTransactions do
 
   defp schedule_check(completed? \\ false) do
     Process.send_after(self(), :update, (completed? && completed_check_interval()) || @not_completed_check_interval)
+  end
+
+  defp schedule_dependency_check do
+    interval = Application.get_env(:explorer, __MODULE__)[:dependency_check_interval] || :timer.hours(1)
+    Process.send_after(self(), :check_dependency, interval)
   end
 
   defp completed_check_interval do
