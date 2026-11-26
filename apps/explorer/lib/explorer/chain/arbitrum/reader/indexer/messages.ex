@@ -11,7 +11,7 @@ defmodule Explorer.Chain.Arbitrum.Reader.Indexer.Messages do
     - Tracking of L2-to-L1 message executions on L1
   """
 
-  import Ecto.Query, only: [dynamic: 2, from: 2, limit: 2, order_by: 2, select: 3, where: 3]
+  import Ecto.Query
 
   alias Explorer.Chain.Arbitrum.{
     L1Execution,
@@ -226,44 +226,44 @@ defmodule Explorer.Chain.Arbitrum.Reader.Indexer.Messages do
   end
 
   @doc """
-    Retrieves all L2-to-L1 messages with the specified status.
+    Retrieves all L2-to-L1 messages with one of the specified statuses.
 
     If `block_number` is not `nil`, only messages originating in rollup blocks with
     numbers not higher than the specified block are considered. Otherwise, all
     messages are considered.
 
     ## Parameters
-    - `status`: The status of the messages to retrieve, such as `:initiated`,
-      `:sent`, `:confirmed`, or `:relayed`.
+    - `statuses`: The list of the statuses of the messages to retrieve, with the
+      elements `:initiated`, `:sent`, `:confirmed`, or `:relayed`.
     - `block_number`: The number of a rollup block that limits the messages lookup,
       or `nil`.
 
     ## Returns
     - Instances of `Explorer.Chain.Arbitrum.Message` corresponding to the criteria,
-      or `[]` if no messages with the given status are found.
+      or `[]` if no messages with the given statuses are found.
   """
-  @spec l2_to_l1_messages(:confirmed | :initiated | :relayed | :sent, FullBlock.block_number() | nil) :: [
+  @spec l2_to_l1_messages([:confirmed | :initiated | :relayed | :sent], FullBlock.block_number() | nil) :: [
           Message.t()
         ]
-  def l2_to_l1_messages(status, block_number)
-      when status in [:initiated, :sent, :confirmed, :relayed] and
+  def l2_to_l1_messages(statuses, block_number)
+      when is_list(statuses) and
              is_integer(block_number) and
              block_number >= 0 do
     query =
       from(msg in Message,
         where:
           msg.direction == :from_l2 and msg.originating_transaction_block_number <= ^block_number and
-            msg.status == ^status,
+            msg.status in ^statuses,
         order_by: [desc: msg.message_id]
       )
 
     Repo.all(query)
   end
 
-  def l2_to_l1_messages(status, nil) when status in [:initiated, :sent, :confirmed, :relayed] do
+  def l2_to_l1_messages(statuses, nil) when is_list(statuses) do
     query =
       from(msg in Message,
-        where: msg.direction == :from_l2 and msg.status == ^status,
+        where: msg.direction == :from_l2 and msg.status in ^statuses,
         order_by: [desc: msg.message_id]
       )
 
@@ -343,6 +343,7 @@ defmodule Explorer.Chain.Arbitrum.Reader.Indexer.Messages do
     |> order_by(desc: :block_number, desc: :index)
     |> select([log], log)
     |> Repo.all()
+    |> Log.prepare_optimized_fields()
   end
 
   # Constructs a query to retrieve missed L2-to-L1 messages.
@@ -369,27 +370,29 @@ defmodule Explorer.Chain.Arbitrum.Reader.Indexer.Messages do
     # Otherwise, the join condition must be extended with
     # fragment("encode(l0.fourth_topic, 'hex') = LPAD(TO_HEX(a1.message_id::BIGINT), 64, '0')")
     base_condition =
-      dynamic([log, msg], log.transaction_hash == msg.originating_transaction_hash and msg.direction == :from_l2)
+      dynamic(
+        [_log, transaction, msg],
+        transaction.hash == msg.originating_transaction_hash and msg.direction == :from_l2
+      )
 
     join_condition =
       if is_nil(start_block) or is_nil(end_block) do
         base_condition
       else
         dynamic(
-          [_, msg],
+          [_, _, msg],
           ^base_condition and
             msg.originating_transaction_block_number >= ^start_block and
             msg.originating_transaction_block_number <= ^end_block
         )
       end
 
-    from(log in Log,
-      left_join: msg in Message,
-      on: ^join_condition,
-      where:
-        log.address_hash == ^arbsys_contract and log.first_topic == ^l2_to_l1_event and
-          is_nil(msg.originating_transaction_hash)
-    )
+    Log
+    |> Log.join_transaction_query()
+    |> Log.address_match_query(arbsys_contract)
+    |> join(:left, [_log], msg in Message, on: ^join_condition)
+    |> Log.filter_by_topic_query(:first_topic, l2_to_l1_event)
+    |> where([_log, _t, msg], is_nil(msg.originating_transaction_hash))
   end
 
   @doc """

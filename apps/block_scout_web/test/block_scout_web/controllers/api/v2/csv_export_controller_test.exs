@@ -53,6 +53,63 @@ defmodule BlockScoutWeb.Api.V2.CsvExportControllerTest do
       assert conn.status == 429
     end
 
+    test "accepts application/csv on token-transfers CSV endpoint", %{conn: conn} do
+      address = insert(:address)
+
+      transaction =
+        :transaction
+        |> insert(from_address: address)
+        |> with_block()
+
+      insert(:token_transfer, transaction: transaction, from_address: address, block_number: transaction.block_number)
+
+      {:ok, now} = DateTime.now("Etc/UTC")
+
+      conn =
+        conn
+        |> put_req_header("accept", "application/csv")
+        |> get("/api/v2/addresses/#{Address.checksum(address.hash)}/token-transfers/csv", %{
+          "from_period" => DateTime.add(now, -1, :minute) |> DateTime.to_iso8601(),
+          "to_period" => DateTime.to_iso8601(now)
+        })
+
+      assert conn.status == 200
+
+      assert Enum.any?(get_resp_header(conn, "content-type"), fn type ->
+               String.contains?(type, "application/csv")
+             end)
+
+      assert conn.resp_body =~ to_string(transaction.hash)
+    end
+
+    test "returns 422 when from_period or to_period is omitted", %{conn: conn} do
+      address = insert(:address)
+
+      conn =
+        get(conn, "/api/v2/addresses/#{Address.checksum(address.hash)}/token-transfers/csv", %{
+          "from_period" => "2023-01-01"
+        })
+
+      assert conn.status == 422
+      assert %{"errors" => [%{"source" => %{"pointer" => "/to_period"}} | _]} = json_response(conn, 422)
+    end
+
+    test "returns JSON 404 for unknown address when Accept: application/csv is sent", %{conn: conn} do
+      conn =
+        conn
+        |> put_req_header("accept", "application/csv")
+        |> get("/api/v2/addresses/0x000000000000000000000000000000000000dEaD/token-transfers/csv", %{
+          "from_period" => "2023-01-01",
+          "to_period" => "2023-01-02"
+        })
+
+      assert conn.status == 404
+
+      assert Enum.any?(get_resp_header(conn, "content-type"), fn type ->
+               String.contains?(type, "application/json")
+             end)
+    end
+
     test "do not export token transfers to csv after rate limit is reached without recaptcha passed", %{
       conn: conn,
       v2_secret_key: recaptcha_secret_key
@@ -65,7 +122,7 @@ defmodule BlockScoutWeb.Api.V2.CsvExportControllerTest do
           {:ok,
            %Tesla.Env{
              status: 200,
-             body: Jason.encode!(%{"success" => false})
+             body: Utils.JSON.encode!(%{"success" => false})
            }}
         end
       )
@@ -159,7 +216,7 @@ defmodule BlockScoutWeb.Api.V2.CsvExportControllerTest do
            %Tesla.Env{
              status: 200,
              body:
-               Jason.encode!(%{
+               Utils.JSON.encode!(%{
                  "success" => true,
                  "hostname" => Application.get_env(:block_scout_web, BlockScoutWeb.Endpoint)[:url][:host]
                })
@@ -247,7 +304,7 @@ defmodule BlockScoutWeb.Api.V2.CsvExportControllerTest do
            %Tesla.Env{
              status: 200,
              body:
-               Jason.encode!(%{
+               Utils.JSON.encode!(%{
                  "success" => true,
                  "hostname" => Application.get_env(:block_scout_web, BlockScoutWeb.Endpoint)[:url][:host]
                })
@@ -344,7 +401,7 @@ defmodule BlockScoutWeb.Api.V2.CsvExportControllerTest do
            %Tesla.Env{
              status: 200,
              body:
-               Jason.encode!(%{
+               Utils.JSON.encode!(%{
                  "success" => true,
                  "hostname" => Application.get_env(:block_scout_web, BlockScoutWeb.Endpoint)[:url][:host]
                })
@@ -419,6 +476,62 @@ defmodule BlockScoutWeb.Api.V2.CsvExportControllerTest do
 
       assert conn.status == 200
       assert conn.resp_body |> String.split("\n") |> Enum.count() == 5
+    end
+
+    test "include_zero_value=false excludes zero-value call internal transactions", %{conn: conn} do
+      init_config = Application.get_env(:block_scout_web, :recaptcha)
+      Application.put_env(:block_scout_web, :recaptcha, is_disabled: true)
+      on_exit(fn -> Application.put_env(:block_scout_web, :recaptcha, init_config) end)
+
+      address = insert(:address)
+
+      transaction =
+        :transaction
+        |> insert()
+        |> with_block()
+
+      insert(:internal_transaction,
+        index: 1,
+        transaction: transaction,
+        to_address: address,
+        block_number: transaction.block_number,
+        transaction_index: transaction.index,
+        type: :call,
+        value: Decimal.new(0)
+      )
+
+      insert(:internal_transaction,
+        index: 2,
+        transaction: transaction,
+        to_address: address,
+        block_number: transaction.block_number,
+        transaction_index: transaction.index,
+        type: :call,
+        value: Decimal.new(1)
+      )
+
+      {:ok, now} = DateTime.now("Etc/UTC")
+      from_period = DateTime.add(now, -1, :day) |> DateTime.to_iso8601()
+      to_period = now |> DateTime.to_iso8601()
+
+      path = "/api/v2/addresses/#{Address.checksum(address.hash)}/internal-transactions/csv"
+
+      conn_filtered =
+        get(conn, path, %{
+          "from_period" => from_period,
+          "to_period" => to_period,
+          "include_zero_value" => "false"
+        })
+
+      assert conn_filtered.status == 200
+      # header + 1 row + trailing newline
+      assert [_header, row, ""] = String.split(conn_filtered.resp_body, "\n")
+      assert row =~ ~r/^[^,]+,2,/
+
+      conn_default = get(conn, path, %{"from_period" => from_period, "to_period" => to_period})
+
+      assert conn_default.status == 200
+      assert conn_default.resp_body |> String.split("\n") |> Enum.count() == 4
     end
   end
 
@@ -667,6 +780,137 @@ defmodule BlockScoutWeb.Api.V2.CsvExportControllerTest do
       assert is_binary(request_id)
     end
 
+    test "passes include_zero_value through to the async internal-transactions export job", %{conn: conn} do
+      address = insert(:address)
+
+      transaction =
+        :transaction
+        |> insert()
+        |> with_block()
+
+      insert(:internal_transaction,
+        index: 0,
+        transaction: transaction,
+        from_address: address,
+        block_number: transaction.block_number,
+        transaction_index: transaction.index
+      )
+
+      {:ok, now} = DateTime.now("Etc/UTC")
+      from_period = DateTime.add(now, -1, :day) |> DateTime.to_iso8601()
+      to_period = now |> DateTime.to_iso8601()
+
+      conn =
+        get(conn, "/api/v2/addresses/#{Address.checksum(address.hash)}/internal-transactions/csv", %{
+          "from_period" => from_period,
+          "to_period" => to_period,
+          "include_zero_value" => "false"
+        })
+
+      assert %{"request_id" => request_id} = json_response(conn, 202)
+
+      assert [job] = all_enqueued(worker: Explorer.Chain.CsvExport.Worker)
+      assert job.args["request_id"] == request_id
+      assert job.args["module"] == "Elixir.BlockScoutWeb.CsvExport.Address.InternalTransactions"
+      assert job.args["include_zero_value"] == false
+    end
+
+    test "async internal-transactions export job omits zero-value call internal transactions", %{
+      conn: conn,
+      bypass: bypass
+    } do
+      # One large upload chunk keeps the whole CSV in a single request body so
+      # the assertions below can look for complete transaction hashes.
+      config = Application.get_env(:explorer, Explorer.Chain.CsvExport)
+
+      Application.put_env(
+        :explorer,
+        Explorer.Chain.CsvExport,
+        Keyword.merge(config,
+          chunk_size: 1_000_000,
+          tmp_dir: Path.join(System.tmp_dir!(), "csv_export_test_#{:rand.uniform(100_000)}")
+        )
+      )
+
+      address = insert(:address)
+
+      zero_value_transaction =
+        :transaction
+        |> insert()
+        |> with_block()
+
+      non_zero_transaction =
+        :transaction
+        |> insert()
+        |> with_block()
+
+      insert(:internal_transaction,
+        index: 1,
+        transaction: zero_value_transaction,
+        to_address: address,
+        block_number: zero_value_transaction.block_number,
+        transaction_index: zero_value_transaction.index,
+        type: :call,
+        value: Decimal.new(0)
+      )
+
+      insert(:internal_transaction,
+        index: 1,
+        transaction: non_zero_transaction,
+        to_address: address,
+        block_number: non_zero_transaction.block_number,
+        transaction_index: non_zero_transaction.index,
+        type: :call,
+        value: Decimal.new(1)
+      )
+
+      {:ok, now} = DateTime.now("Etc/UTC")
+      from_period = DateTime.add(now, -1, :day) |> DateTime.to_iso8601()
+      to_period = now |> DateTime.to_iso8601()
+
+      conn =
+        get(conn, "/api/v2/addresses/#{Address.checksum(address.hash)}/internal-transactions/csv", %{
+          "from_period" => from_period,
+          "to_period" => to_period,
+          "include_zero_value" => "false"
+        })
+
+      assert %{"request_id" => request_id} = json_response(conn, 202)
+      assert [job] = all_enqueued(worker: Explorer.Chain.CsvExport.Worker)
+
+      test_pid = self()
+
+      Bypass.expect(bypass, fn conn ->
+        [path | _] = String.split(conn.request_path, "?")
+
+        cond do
+          path == "/api/chunk/add" ->
+            {:ok, body, conn} = Plug.Conn.read_body(conn)
+            send(test_pid, {:chunk, body})
+            Plug.Conn.resp(conn, 200, "")
+
+          path == "/api/chunk/complete" ->
+            Plug.Conn.resp(
+              conn,
+              200,
+              Utils.JSON.encode!(%{"FileInfo" => %{"Id" => "test-file-id", "ExpireAt" => DateTime.to_unix(now)}})
+            )
+
+          true ->
+            Plug.Conn.resp(conn, 404, "Not found")
+        end
+      end)
+
+      assert :ok = perform_job(Explorer.Chain.CsvExport.Worker, job.args)
+
+      assert_receive {:chunk, csv_body}
+      assert csv_body =~ "TxHash"
+      assert csv_body =~ to_string(non_zero_transaction.hash)
+      refute csv_body =~ to_string(zero_value_transaction.hash)
+
+      assert Explorer.Chain.CsvExport.Request.get_by_uuid(request_id).status == :completed
+    end
+
     test "returns 202 with request_id for logs export when async enabled", %{conn: conn} do
       address = insert(:address)
 
@@ -694,9 +938,39 @@ defmodule BlockScoutWeb.Api.V2.CsvExportControllerTest do
         })
 
       assert conn.status == 202
-      body = Jason.decode!(conn.resp_body)
+      body = Utils.JSON.decode!(conn.resp_body)
       assert Map.has_key?(body, "request_id")
       assert is_binary(body["request_id"])
+    end
+
+    test "returns 202 with request_id for token transfers from token export when async enabled", %{conn: conn} do
+      token = insert(:token, type: "ERC-20", decimals: 18, symbol: "TKN")
+
+      transaction =
+        :transaction
+        |> insert()
+        |> with_block()
+
+      insert(:token_transfer,
+        transaction: transaction,
+        token_contract_address: token.contract_address,
+        token_type: "ERC-20",
+        block_number: transaction.block_number,
+        amount: Decimal.new(1_000)
+      )
+
+      {:ok, now} = DateTime.now("Etc/UTC")
+      from_period = DateTime.add(now, -1, :minute) |> DateTime.to_iso8601()
+      to_period = now |> DateTime.to_iso8601()
+
+      conn =
+        get(conn, "/api/v2/tokens/#{Address.checksum(token.contract_address_hash)}/transfers/csv", %{
+          "from_period" => from_period,
+          "to_period" => to_period
+        })
+
+      assert %{"request_id" => request_id} = json_response(conn, 202)
+      assert is_binary(request_id)
     end
 
     test "returns 202 with request_id for token holders export when async enabled", %{conn: conn} do
@@ -830,6 +1104,125 @@ defmodule BlockScoutWeb.Api.V2.CsvExportControllerTest do
     end
   end
 
+  describe "GET /api/v2/tokens/:hash/transfers/csv" do
+    setup do
+      result = csv_setup()
+
+      original_config = Application.get_env(:explorer, Explorer.Chain.CsvExport)
+      config = (original_config || []) |> Keyword.put(:async?, false)
+      Application.put_env(:explorer, Explorer.Chain.CsvExport, config)
+
+      on_exit(fn ->
+        if original_config do
+          Application.put_env(:explorer, Explorer.Chain.CsvExport, original_config)
+        else
+          Application.delete_env(:explorer, Explorer.Chain.CsvExport)
+        end
+      end)
+
+      result
+    end
+
+    test "exports token transfers to csv in sync mode", %{conn: conn} do
+      token = insert(:token, type: "ERC-20", decimals: 18, symbol: "TKN")
+
+      transaction =
+        :transaction
+        |> insert()
+        |> with_block()
+
+      insert(:token_transfer,
+        transaction: transaction,
+        token_contract_address: token.contract_address,
+        token_type: "ERC-20",
+        block_number: transaction.block_number,
+        amount: Decimal.new(1_000)
+      )
+
+      {:ok, now} = DateTime.now("Etc/UTC")
+      from_period = DateTime.add(now, -1, :minute) |> DateTime.to_iso8601()
+      to_period = now |> DateTime.to_iso8601()
+
+      conn =
+        get(conn, "/api/v2/tokens/#{Address.checksum(token.contract_address_hash)}/transfers/csv", %{
+          "from_period" => from_period,
+          "to_period" => to_period
+        })
+
+      assert conn.status == 200
+      assert conn.resp_body =~ "TxHash"
+      assert conn.resp_body =~ "TokensTransferred"
+    end
+
+    test "exports multiple token transfers to csv", %{conn: conn} do
+      token = insert(:token, type: "ERC-20", decimals: 18, symbol: "TKN")
+
+      transaction =
+        :transaction
+        |> insert()
+        |> with_block()
+
+      insert(:token_transfer,
+        transaction: transaction,
+        token_contract_address: token.contract_address,
+        token_type: "ERC-20",
+        block_number: transaction.block_number,
+        amount: Decimal.new(1_000)
+      )
+
+      insert(:token_transfer,
+        transaction: transaction,
+        token_contract_address: token.contract_address,
+        token_type: "ERC-20",
+        block_number: transaction.block_number,
+        amount: Decimal.new(2_000)
+      )
+
+      {:ok, now} = DateTime.now("Etc/UTC")
+      from_period = DateTime.add(now, -1, :minute) |> DateTime.to_iso8601()
+      to_period = now |> DateTime.to_iso8601()
+
+      conn =
+        get(conn, "/api/v2/tokens/#{Address.checksum(token.contract_address_hash)}/transfers/csv", %{
+          "from_period" => from_period,
+          "to_period" => to_period
+        })
+
+      assert conn.status == 200
+      assert conn.resp_body |> String.split("\n") |> Enum.count() == 4
+    end
+
+    test "returns 404 for non-existent token", %{conn: conn} do
+      fake_hash = "0x0000000000000000000000000000000000000001"
+
+      {:ok, now} = DateTime.now("Etc/UTC")
+      from_period = DateTime.add(now, -1, :minute) |> DateTime.to_iso8601()
+      to_period = now |> DateTime.to_iso8601()
+
+      conn =
+        get(conn, "/api/v2/tokens/#{fake_hash}/transfers/csv", %{
+          "from_period" => from_period,
+          "to_period" => to_period
+        })
+
+      assert %{"message" => "Not found"} = json_response(conn, 404)
+    end
+
+    test "returns 422 for invalid token hash", %{conn: conn} do
+      conn = get(conn, "/api/v2/tokens/not-a-valid-hash/transfers/csv")
+
+      assert %{
+               "errors" => [
+                 %{
+                   "detail" => "Invalid format. Expected ~r/^0x([A-Fa-f0-9]{40})$/",
+                   "source" => %{"pointer" => "/address_hash_param"},
+                   "title" => "Invalid value"
+                 }
+               ]
+             } = json_response(conn, 422)
+    end
+  end
+
   describe "GET logs_csv/2" do
     setup do
       csv_setup()
@@ -850,6 +1243,7 @@ defmodule BlockScoutWeb.Api.V2.CsvExportControllerTest do
         address: address,
         index: 0,
         transaction: transaction,
+        transaction_index: transaction.index,
         block: transaction.block,
         block_number: transaction.block_number
       )
@@ -881,7 +1275,7 @@ defmodule BlockScoutWeb.Api.V2.CsvExportControllerTest do
            %Tesla.Env{
              status: 200,
              body:
-               Jason.encode!(%{
+               Utils.JSON.encode!(%{
                  "success" => true,
                  "hostname" => Application.get_env(:block_scout_web, BlockScoutWeb.Endpoint)[:url][:host]
                })
@@ -900,6 +1294,7 @@ defmodule BlockScoutWeb.Api.V2.CsvExportControllerTest do
         address: address,
         index: 3,
         transaction: transaction_1,
+        transaction_index: transaction_1.index,
         block: transaction_1.block,
         block_number: transaction_1.block_number
       )
@@ -913,6 +1308,7 @@ defmodule BlockScoutWeb.Api.V2.CsvExportControllerTest do
         address: address,
         index: 1,
         transaction: transaction_2,
+        transaction_index: transaction_2.index,
         block: transaction_2.block,
         block_number: transaction_2.block_number
       )
@@ -926,6 +1322,7 @@ defmodule BlockScoutWeb.Api.V2.CsvExportControllerTest do
         address: address,
         index: 2,
         transaction: transaction_3,
+        transaction_index: transaction_3.index,
         block: transaction_3.block,
         block_number: transaction_3.block_number
       )
@@ -969,6 +1366,7 @@ defmodule BlockScoutWeb.Api.V2.CsvExportControllerTest do
         address: address,
         index: 3,
         transaction: transaction,
+        transaction_index: transaction.index,
         block: transaction.block,
         block_number: transaction.block_number
       )
@@ -1082,6 +1480,12 @@ defmodule BlockScoutWeb.Api.V2.CsvExportControllerTest do
           ip: %{period: 3_600_000, limit: 1},
           recaptcha_to_bypass_429: true,
           bucket_key_prefix: "api/v2/tokens/:param/holders/csv_",
+          isolate_rate_limit?: true
+        },
+        ["api", "v2", "tokens", ":param", "transfers", "csv"] => %{
+          ip: %{period: 3_600_000, limit: 1},
+          recaptcha_to_bypass_429: true,
+          bucket_key_prefix: "api/v2/tokens/:param/transfers/csv_",
           isolate_rate_limit?: true
         }
       }

@@ -5,6 +5,7 @@ defmodule Explorer.Chain.Metrics.Queries.IndexerMetricsTest do
   import Explorer.Factory
 
   alias Explorer.Chain.Metrics.Queries.IndexerMetrics
+  alias Explorer.Chain.SmartContract
 
   describe "missing_blocks_count/0" do
     test "counts only within configured ranges and latest tail" do
@@ -31,6 +32,24 @@ defmodule Explorer.Chain.Metrics.Queries.IndexerMetricsTest do
       end)
 
       assert IndexerMetrics.missing_blocks_count() == 1
+    end
+
+    if Application.compile_env(:explorer, :chain_type) == :filecoin do
+      test "does not count recorded null rounds as missing blocks" do
+        previous_block_ranges = Application.get_env(:indexer, :block_ranges)
+        on_exit(fn -> Application.put_env(:indexer, :block_ranges, previous_block_ranges) end)
+
+        Application.put_env(:indexer, :block_ranges, "1..5,10..latest")
+
+        Enum.each([1, 3, 5, 10, 13], fn number ->
+          insert(:block, number: number, consensus: true)
+        end)
+
+        # 2 and 11 are null rounds, 4 and 12 are genuinely missing
+        Explorer.Chain.NullRoundHeight.insert_heights([2, 11])
+
+        assert IndexerMetrics.missing_blocks_count() == 2
+      end
     end
   end
 
@@ -188,6 +207,53 @@ defmodule Explorer.Chain.Metrics.Queries.IndexerMetricsTest do
     end
   end
 
+  describe "missing_current_token_balances_count/0" do
+    setup do
+      previous_block_ranges = Application.get_env(:indexer, :block_ranges)
+      previous_config = Application.get_env(:indexer, Indexer.Fetcher.TokenBalance.Current.Supervisor)
+
+      on_exit(fn ->
+        Application.put_env(:indexer, :block_ranges, previous_block_ranges)
+
+        if is_nil(previous_config) do
+          Application.delete_env(:indexer, Indexer.Fetcher.TokenBalance.Current.Supervisor)
+        else
+          Application.put_env(:indexer, Indexer.Fetcher.TokenBalance.Current.Supervisor, previous_config)
+        end
+      end)
+
+      Application.put_env(:indexer, :block_ranges, "0..latest")
+
+      insert(:address_current_token_balance, token_type: "ERC-20", value: nil, value_fetched_at: nil)
+      insert(:address_current_token_balance, token_type: "ERC-20", value: nil, value_fetched_at: nil)
+      insert(:address_current_token_balance, token_type: "ERC-20")
+
+      {:ok, previous_config: previous_config || []}
+    end
+
+    test "returns 0 when current token balances fetcher is disabled", %{previous_config: previous_config} do
+      Application.put_env(
+        :indexer,
+        Indexer.Fetcher.TokenBalance.Current.Supervisor,
+        Keyword.merge(previous_config, disabled?: true)
+      )
+
+      assert IndexerMetrics.missing_current_token_balances_count() == 0
+    end
+
+    test "counts current token balances with missing values when fetcher is enabled", %{
+      previous_config: previous_config
+    } do
+      Application.put_env(
+        :indexer,
+        Indexer.Fetcher.TokenBalance.Current.Supervisor,
+        Keyword.merge(previous_config, disabled?: false)
+      )
+
+      assert IndexerMetrics.missing_current_token_balances_count() == 2
+    end
+  end
+
   describe "missing_archival_token_balances_count/0" do
     test "returns 0 when archival token balances fetcher is disabled" do
       previous_config =
@@ -236,6 +302,35 @@ defmodule Explorer.Chain.Metrics.Queries.IndexerMetricsTest do
       insert(:token_balance, value_fetched_at: DateTime.utc_now())
 
       assert IndexerMetrics.missing_archival_token_balances_count() == 0
+    end
+
+    test "counts only the token balances the archival fetcher fetches" do
+      previous_config =
+        Application.get_env(:indexer, Indexer.Fetcher.TokenBalance.Historical.Supervisor)
+
+      on_exit(fn ->
+        Application.put_env(:indexer, Indexer.Fetcher.TokenBalance.Historical.Supervisor, previous_config)
+      end)
+
+      Application.put_env(
+        :indexer,
+        Indexer.Fetcher.TokenBalance.Historical.Supervisor,
+        Keyword.merge(previous_config || [], disabled?: false)
+      )
+
+      insert(:token_balance, token_type: "ERC-20", value_fetched_at: nil)
+      insert(:token_balance, token_type: "ERC-20", value: nil)
+      insert(:token_balance, token_type: "ERC-721", value_fetched_at: nil)
+      insert(:token_balance, token_type: "ERC-1155", value_fetched_at: nil)
+
+      assert IndexerMetrics.missing_archival_token_balances_count() == 4
+
+      # the fetcher skips ERC-721 balances of the burn address and ERC-7984 balances
+      burn_address = insert(:address, hash: SmartContract.burn_address_hash_string())
+      insert(:token_balance, token_type: "ERC-721", address: burn_address, value_fetched_at: nil)
+      insert(:token_balance, token_type: "ERC-7984", value_fetched_at: nil)
+
+      assert IndexerMetrics.missing_archival_token_balances_count() == 4
     end
   end
 

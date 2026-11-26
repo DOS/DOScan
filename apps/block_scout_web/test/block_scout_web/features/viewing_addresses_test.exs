@@ -4,7 +4,7 @@ defmodule BlockScoutWeb.ViewingAddressesTest do
     # Because ETS tables is shared for `Explorer.Counters.*`
     async: false
 
-  alias Explorer.Chain.Cache.Counters.AddressesCount
+  alias Explorer.Chain.Cache.Counters.AddressesAggregates
   alias BlockScoutWeb.{AddressPage, AddressView, Notifier}
 
   setup do
@@ -56,7 +56,7 @@ defmodule BlockScoutWeb.ViewingAddressesTest do
 
   describe "viewing top addresses" do
     setup do
-      addresses = Enum.map(150..101, &insert(:address, fetched_coin_balance: &1))
+      addresses = Enum.map(150..101//-1, &insert(:address, fetched_coin_balance: &1))
 
       {:ok, %{addresses: addresses}}
     end
@@ -65,8 +65,7 @@ defmodule BlockScoutWeb.ViewingAddressesTest do
       [first_address | _] = addresses
       [last_address | _] = Enum.reverse(addresses)
 
-      start_supervised!(AddressesCount)
-      AddressesCount.consolidate()
+      AddressesAggregates.consolidate()
 
       session
       |> AddressPage.visit_page()

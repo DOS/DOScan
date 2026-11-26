@@ -343,6 +343,46 @@ defmodule Indexer.Fetcher.Beacon.DepositTest do
                  Repo.all(from(d in Deposit, order_by: [asc: :index]))
       end
 
+      test "processes logs stored with `compressed_data` only" do
+        state = Map.put(@state, :batch_size, 5)
+
+        deposit_contract_address = insert(:address, hash: "0x00000000219ab540356cbb839cbe05303d7705fa")
+
+        transaction_a = insert(:transaction) |> with_block()
+
+        # `data` is `NULL` for logs imported by v12+, the payload is in `compressed_data` only
+        log_a =
+          insert(:beacon_deposit_log,
+            address: deposit_contract_address,
+            deposit_index: 0,
+            transaction: transaction_a,
+            block: transaction_a.block,
+            data: nil
+          )
+
+        transaction_b = insert(:transaction) |> with_block()
+
+        log_b =
+          insert(:beacon_deposit_log,
+            address: deposit_contract_address,
+            deposit_index: 1,
+            transaction: transaction_b,
+            block: transaction_b.block,
+            data: nil
+          )
+
+        DepositFetcher.handle_info(:process_logs, state)
+
+        log_a_transaction_hash = log_a.transaction_hash
+        log_b_transaction_hash = log_b.transaction_hash
+
+        # deposit indexes are decoded from the log payload
+        assert [
+                 %Deposit{index: 0, transaction_hash: ^log_a_transaction_hash},
+                 %Deposit{index: 1, transaction_hash: ^log_b_transaction_hash}
+               ] = Repo.all(from(d in Deposit, order_by: [asc: :index]))
+      end
+
       test "fallbacks to fetch data from the node when non-sequential logs are detected (logs starts not from 0, between batches)",
            %{json_rpc_named_arguments: json_rpc_named_arguments} do
         deposit_contract_address = insert(:address, hash: "0x00000000219ab540356cbb839cbe05303d7705fa")
@@ -905,6 +945,90 @@ defmodule Indexer.Fetcher.Beacon.DepositTest do
 
         assert [%Deposit{status: :pending, index: 0}, %Deposit{status: :invalid, index: 1}] =
                  Repo.all(from(d in Deposit, order_by: [asc: :index]))
+      end
+    end
+
+    describe "handle_cast({:lost_consensus, block_number}, state)" do
+      test "keeps the cursor when the reorged block is ahead of the last processed deposit" do
+        insert(:beacon_deposit, index: 5, block_number: 100, log_index: 3)
+
+        state = %{
+          @state
+          | deposit_index: 5,
+            last_processed_log_block_number: 100,
+            last_processed_log_index: 3
+        }
+
+        # the fetcher trails the head: a reorg at block 200 must not move the
+        # cursor past the deposit logs of blocks 101..200 it has not seen yet
+        assert {:noreply, ^state} = DepositFetcher.handle_cast({:lost_consensus, 200}, state)
+        assert [5] = Repo.all(from(d in Deposit, select: d.index))
+
+        deposit_contract_address = insert(:address, hash: "0x00000000219ab540356cbb839cbe05303d7705fa")
+        block = insert(:block, number: 150)
+        transaction = insert(:transaction) |> with_block(block)
+
+        log =
+          insert(:beacon_deposit_log,
+            address: deposit_contract_address,
+            deposit_index: 6,
+            transaction: transaction,
+            block: block,
+            block_number: block.number
+          )
+
+        log_index = log.index
+
+        assert {:noreply,
+                %DepositFetcher{
+                  deposit_index: 6,
+                  last_processed_log_block_number: 150,
+                  last_processed_log_index: ^log_index
+                }} = DepositFetcher.handle_info(:process_logs, state)
+
+        assert [5, 6] = Repo.all(from(d in Deposit, order_by: [asc: :index], select: d.index))
+      end
+
+      test "rewinds the cursor to the latest surviving deposit when deposits are deleted" do
+        insert(:beacon_deposit, index: 5, block_number: 100, log_index: 3)
+        insert(:beacon_deposit, index: 6, block_number: 150, log_index: 1)
+        insert(:beacon_deposit, index: 7, block_number: 160, log_index: 2)
+
+        state = %{
+          @state
+          | deposit_index: 7,
+            last_processed_log_block_number: 160,
+            last_processed_log_index: 2
+        }
+
+        assert {:noreply,
+                %DepositFetcher{
+                  deposit_index: 5,
+                  last_processed_log_block_number: 100,
+                  last_processed_log_index: 3
+                }} = DepositFetcher.handle_cast({:lost_consensus, 120}, state)
+
+        assert [5] = Repo.all(from(d in Deposit, select: d.index))
+      end
+
+      test "resets the cursor when all deposits are deleted" do
+        insert(:beacon_deposit, index: 5, block_number: 100, log_index: 3)
+
+        state = %{
+          @state
+          | deposit_index: 5,
+            last_processed_log_block_number: 100,
+            last_processed_log_index: 3
+        }
+
+        assert {:noreply,
+                %DepositFetcher{
+                  deposit_index: -1,
+                  last_processed_log_block_number: -1,
+                  last_processed_log_index: -1
+                }} = DepositFetcher.handle_cast({:lost_consensus, 50}, state)
+
+        assert [] = Repo.all(Deposit)
       end
     end
   end

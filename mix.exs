@@ -8,7 +8,7 @@ defmodule BlockScout.Mixfile do
     [
       # app: :block_scout,
       # aliases: aliases(config_env()),
-      version: "11.2.8",
+      version: "12.1.0",
       apps_path: "apps",
       deps: deps(),
       dialyzer: dialyzer(),
@@ -104,10 +104,14 @@ defmodule BlockScout.Mixfile do
   # and cannot be accessed from applications inside the apps folder
   defp deps do
     [
+      {:ex_abi, "~> 0.8.5"},
       {:prometheus_ex, "~> 5.1.0", override: true},
       {:absinthe_plug, git: "https://github.com/blockscout/absinthe_plug.git", tag: "1.5.8", override: true},
-      {:tesla, "~> 1.21.0"},
-      {:mint, "~> 1.9.0"},
+      {:tesla, "~> 1.22.0"},
+      {:mint, "~> 1.11.0"},
+      # `mock` pins `meck ~> 0.9.2`, which fails to compile on OTP 29 (bare `catch`
+      # deprecation + `warnings_as_errors`). meck 1.x keeps the same API.
+      {:meck, "~> 1.2", override: true, only: [:test], runtime: false},
       # Documentation
       {:ex_doc, "~> 0.40.1", only: :dev, runtime: false},
       {:number, "~> 1.0.3"}

@@ -17,12 +17,13 @@ defmodule Utils.HttpClient.TeslaHelper do
   ## Returns
   - A Tesla client struct with configured middleware
   """
-  @spec client(keyword() | map()) :: Tesla.Client.t()
-  def client(options) do
+  @spec client(keyword() | map(), list()) :: Tesla.Client.t()
+  def client(options, additional_middleware \\ []) do
     options[:recv_timeout]
     |> add_timeout_middleware()
     |> add_follow_redirect_middleware(options[:follow_redirect])
     |> add_basic_auth_middleware(options[:basic_auth])
+    |> add_additional_middleware(additional_middleware)
     |> Tesla.client()
   end
 
@@ -42,8 +43,40 @@ defmodule Utils.HttpClient.TeslaHelper do
       |> add_recv_timeout_option(options[:recv_timeout])
       |> add_timeout_option(options[:timeout])
       |> add_insecure_option(options[:insecure])
+      |> add_max_body_length_option(options[:max_body_length])
+      |> add_hostname_option(options[:hostname])
+      |> add_inet6_option(options[:inet6])
 
     [adapter: adapter_options]
+  end
+
+  # Set by `Utils.HttpClient.SafeFetch` when the validated address is IPv6: Mint connects over
+  # an `:inet` socket unless told otherwise, and an IPv6 literal cannot be reached that way.
+  # Mint reads `:inet6` from the transport options, not from the connect options. Its IPv4
+  # fallback is switched off: retrying an IPv6 literal over IPv4 turns a connection error into
+  # `:nxdomain`, which hides the real reason from the caller.
+  defp add_inet6_option(options, true) do
+    Keyword.update(options, :transport_opts, [inet6: true, inet4: false], fn transport_opts ->
+      transport_opts |> Keyword.put(:inet6, true) |> Keyword.put(:inet4, false)
+    end)
+  end
+
+  defp add_inet6_option(options, _inet6), do: options
+
+  # Set by `Utils.HttpClient.SafeFetch` when the URL host is a validated IP literal: Mint
+  # takes the `Host` header, SNI and the certificate hostname check from `:hostname`.
+  defp add_hostname_option(options, nil), do: options
+
+  defp add_hostname_option(options, hostname) do
+    Keyword.put(options, :hostname, hostname)
+  end
+
+  # Caps the buffered response body at the adapter level: `Tesla.Adapter.Mint` stops reading
+  # and returns `{:error, :body_too_large}` once the limit is exceeded.
+  defp add_max_body_length_option(options, nil), do: options
+
+  defp add_max_body_length_option(options, max_body_length) do
+    Keyword.put(options, :max_body, max_body_length)
   end
 
   defp add_timeout_middleware(middleware \\ [], timeout)
@@ -65,6 +98,10 @@ defmodule Utils.HttpClient.TeslaHelper do
   end
 
   defp add_basic_auth_middleware(middleware, _basic_auth), do: middleware
+
+  defp add_additional_middleware(middleware, additional_middleware) when is_list(additional_middleware) do
+    middleware ++ additional_middleware
+  end
 
   defp add_recv_timeout_option(options, nil), do: options
 

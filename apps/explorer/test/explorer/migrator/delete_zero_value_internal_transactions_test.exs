@@ -28,7 +28,7 @@ defmodule Explorer.Migrator.DeleteZeroValueInternalTransactionsTest do
 
     block = insert(:block, timestamp: Timex.shift(Timex.now(), days: -40))
 
-    Enum.map(1..3, fn i ->
+    Enum.map(1..3, fn _i ->
       transaction =
         :transaction
         |> insert()
@@ -46,7 +46,7 @@ defmodule Explorer.Migrator.DeleteZeroValueInternalTransactionsTest do
       )
     end)
 
-    Enum.map(1..4, fn i ->
+    Enum.map(1..4, fn _i ->
       transaction =
         :transaction
         |> insert()
@@ -64,7 +64,7 @@ defmodule Explorer.Migrator.DeleteZeroValueInternalTransactionsTest do
       )
     end)
 
-    Enum.map(1..5, fn i ->
+    Enum.map(1..5, fn _i ->
       transaction =
         :transaction
         |> insert()
@@ -82,7 +82,7 @@ defmodule Explorer.Migrator.DeleteZeroValueInternalTransactionsTest do
       )
     end)
 
-    Enum.map(1..4, fn i ->
+    Enum.map(1..4, fn _i ->
       transaction =
         :transaction
         |> insert()
@@ -98,7 +98,7 @@ defmodule Explorer.Migrator.DeleteZeroValueInternalTransactionsTest do
       )
     end)
 
-    Enum.map(1..5, fn i ->
+    Enum.map(1..5, fn _i ->
       transaction =
         :transaction
         |> insert()
@@ -113,7 +113,7 @@ defmodule Explorer.Migrator.DeleteZeroValueInternalTransactionsTest do
       )
     end)
 
-    Enum.map(1..6, fn i ->
+    Enum.map(1..6, fn _i ->
       transaction =
         :transaction
         |> insert()
@@ -192,6 +192,40 @@ defmodule Explorer.Migrator.DeleteZeroValueInternalTransactionsTest do
              p.address_id == address_3_id and p.block_number == block.number and p.count_tos == 4 and
                p.count_froms == 5
            end)
+  end
+
+  test "Deletes zero value calls of the border block when the previous batch ends right below it" do
+    # with the default batch size of 100 the first batch covers blocks -1..99, so the next
+    # one consists of the border block only
+    block = insert(:block, number: 100, timestamp: Timex.shift(Timex.now(), days: -40))
+
+    transaction =
+      :transaction
+      |> insert()
+      |> with_block(block)
+
+    insert(:internal_transaction,
+      index: 10,
+      transaction: transaction,
+      block_number: transaction.block_number,
+      transaction_index: transaction.index,
+      type: :call,
+      value: 0
+    )
+
+    DeleteZeroValueInternalTransactions.start_link([])
+
+    wait_for_results(fn ->
+      Repo.one!(
+        from(ms in MigrationStatus,
+          where:
+            ms.migration_name == ^"delete_zero_value_internal_transactions" and
+              ms.status == "completed"
+        )
+      )
+    end)
+
+    assert Repo.all(InternalTransaction) == []
   end
 
   describe "ShrinkInternalTransactions migration dependency handling" do

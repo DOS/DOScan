@@ -2,8 +2,9 @@
 defmodule BlockScoutWeb.API.V2.AdvancedFilterControllerTest do
   use BlockScoutWeb.ConnCase
 
+  alias Explorer.Chain.Cache.BackgroundMigrations
   alias Explorer.Chain.SmartContract
-  alias Explorer.Chain.{AdvancedFilter, Data, Hash}
+  alias Explorer.Chain.{Address, AdvancedFilter, Data, Hash}
   alias Explorer.{Factory, TestHelper}
 
   describe "/advanced_filters" do
@@ -56,6 +57,70 @@ defmodule BlockScoutWeb.API.V2.AdvancedFilterControllerTest do
       response = json_response(request, 200)
 
       assert response["items"] == []
+    end
+
+    test "get token-transfers of a scam token named in token_contract_address_hashes_to_include while scam tokens are hidden",
+         %{conn: conn} do
+      init_value = Application.get_env(:block_scout_web, :hide_scam_addresses)
+      Application.put_env(:block_scout_web, :hide_scam_addresses, true)
+      on_exit(fn -> Application.put_env(:block_scout_web, :hide_scam_addresses, init_value) end)
+
+      transaction = insert(:transaction) |> with_block()
+
+      scam_tt = insert(:token_transfer, transaction: transaction, block_number: transaction.block_number, log_index: 0)
+      insert(:scam_badge_to_address, address_hash: scam_tt.token_contract_address_hash)
+
+      other_tt = insert(:token_transfer, transaction: transaction, block_number: transaction.block_number, log_index: 1)
+
+      request =
+        get(conn, "/api/v2/advanced-filters", %{
+          "token_contract_address_hashes_to_include" => to_string(scam_tt.token_contract_address_hash)
+        })
+
+      response = json_response(request, 200)
+
+      assert [item] = response["items"]
+      assert item["token"]["address_hash"] == Address.checksum(scam_tt.token_contract_address_hash)
+      assert item["token"]["reputation"] == "scam"
+
+      request =
+        get(conn, "/api/v2/advanced-filters", %{
+          "token_contract_address_hashes_to_include" => to_string(other_tt.token_contract_address_hash)
+        })
+
+      response = json_response(request, 200)
+
+      assert [item] = response["items"]
+      assert item["token"]["address_hash"] == Address.checksum(other_tt.token_contract_address_hash)
+    end
+
+    test "hide scam token-transfers when the include list is cancelled out by the exclude list", %{conn: conn} do
+      init_value = Application.get_env(:block_scout_web, :hide_scam_addresses)
+      Application.put_env(:block_scout_web, :hide_scam_addresses, true)
+      on_exit(fn -> Application.put_env(:block_scout_web, :hide_scam_addresses, init_value) end)
+
+      transaction = insert(:transaction) |> with_block()
+
+      scam_tt = insert(:token_transfer, transaction: transaction, block_number: transaction.block_number, log_index: 0)
+      insert(:scam_badge_to_address, address_hash: scam_tt.token_contract_address_hash)
+
+      other_tt = insert(:token_transfer, transaction: transaction, block_number: transaction.block_number, log_index: 1)
+
+      scam_token_hash = to_string(scam_tt.token_contract_address_hash)
+
+      for include <- [scam_token_hash, "#{scam_token_hash},#{scam_token_hash}"] do
+        request =
+          get(conn, "/api/v2/advanced-filters", %{
+            "token_contract_address_hashes_to_include" => include,
+            "token_contract_address_hashes_to_exclude" => scam_token_hash,
+            "transaction_types" => "ERC-20"
+          })
+
+        response = json_response(request, 200)
+
+        assert [item] = response["items"]
+        assert item["token"]["address_hash"] == Address.checksum(other_tt.token_contract_address_hash)
+      end
     end
 
     test "get token-transfers with ok reputation with hide_scam_addresses=false", %{conn: conn} do
@@ -114,6 +179,23 @@ defmodule BlockScoutWeb.API.V2.AdvancedFilterControllerTest do
 
       request = get(conn, "/api/v2/advanced-filters", cursor_params)
       assert json_response(request, 200)
+    end
+
+    test "items_count sets the page size", %{conn: conn} do
+      insert_list(3, :transaction) |> with_block()
+
+      request = get(conn, "/api/v2/advanced-filters", %{"items_count" => "2"})
+      assert response = json_response(request, 200)
+      assert Enum.count(response["items"]) == 2
+      refute is_nil(response["next_page_params"])
+      refute Map.has_key?(response["next_page_params"], "items_count")
+
+      request_2nd_page =
+        get(conn, "/api/v2/advanced-filters", Map.put(response["next_page_params"], "items_count", "2"))
+
+      assert response_2nd_page = json_response(request_2nd_page, 200)
+      assert Enum.count(response_2nd_page["items"]) == 1
+      assert response_2nd_page["next_page_params"] == nil
     end
 
     test "get and paginate advanced filter (transactions split between pages)", %{conn: conn} do
@@ -425,7 +507,7 @@ defmodule BlockScoutWeb.API.V2.AdvancedFilterControllerTest do
       assert response = json_response(request, 200)
 
       assert Enum.all?(response["items"], fn item ->
-               is_nil(item["to"]) and not is_nil(item["created_contract"])
+               not is_nil(item["created_contract"])
              end)
 
       request_2nd_page =
@@ -440,7 +522,7 @@ defmodule BlockScoutWeb.API.V2.AdvancedFilterControllerTest do
       assert Enum.count(response_2nd_page["items"]) == 12
 
       assert Enum.all?(response_2nd_page["items"], fn item ->
-               is_nil(item["to"]) and not is_nil(item["created_contract"])
+               not is_nil(item["created_contract"])
              end)
 
       check_paginated_response(
@@ -665,6 +747,71 @@ defmodule BlockScoutWeb.API.V2.AdvancedFilterControllerTest do
       assert response = json_response(request, 200)
 
       assert Enum.count(response["items"]) == 9
+    end
+
+    test "accepts age preset alongside age_from and age_to", %{conn: conn} do
+      transaction = :transaction |> insert() |> with_block(status: :ok)
+
+      request =
+        get(conn, "/api/v2/advanced-filters", %{
+          "age" => "1h",
+          "age_from" => transaction.block.timestamp |> DateTime.add(-1, :hour) |> DateTime.to_iso8601(),
+          "age_to" => DateTime.to_iso8601(transaction.block.timestamp)
+        })
+
+      assert %{"items" => [_]} = json_response(request, 200)
+    end
+
+    test "excludes token transfers from non-consensus blocks (denormalization finished)", %{conn: conn} do
+      set_denormalization_finished(tt: true, transactions: true)
+
+      assert_only_consensus_token_transfers_returned(conn)
+    end
+
+    test "excludes token transfers from non-consensus blocks (denormalization not finished)", %{conn: conn} do
+      set_denormalization_finished(tt: false, transactions: false)
+
+      assert_only_consensus_token_transfers_returned(conn)
+    end
+
+    test "filters token transfers by block timestamp when only transactions denormalization is not finished",
+         %{conn: conn} do
+      set_denormalization_finished(tt: true, transactions: false)
+
+      [before_window, within_window] =
+        for timestamp <- [~U[2024-01-01 00:00:00.000000Z], ~U[2024-01-03 00:00:00.000000Z]] do
+          block = insert(:block, consensus: false, timestamp: timestamp)
+
+          transaction =
+            insert(:transaction,
+              block_hash: block.hash,
+              block_number: block.number,
+              block_timestamp: block.timestamp,
+              block_consensus: false,
+              index: 0,
+              cumulative_gas_used: 21_000,
+              gas_used: 21_000,
+              status: :ok
+            )
+
+          insert(:token_transfer,
+            transaction: transaction,
+            block: block,
+            block_number: block.number,
+            block_consensus: true
+          )
+        end
+
+      request =
+        get(conn, "/api/v2/advanced-filters", %{
+          "age_from" => DateTime.to_iso8601(~U[2024-01-02 00:00:00.000000Z]),
+          "transaction_types" => "ERC-20"
+        })
+
+      assert response = json_response(request, 200)
+
+      assert Enum.map(response["items"], & &1["block_number"]) == [within_window.block_number]
+      refute before_window.block_number in Enum.map(response["items"], & &1["block_number"])
     end
 
     test "filter by from address include", %{conn: conn} do
@@ -1300,6 +1447,67 @@ defmodule BlockScoutWeb.API.V2.AdvancedFilterControllerTest do
       assert Enum.count(response["items"]) == 6
     end
 
+    test "filter by token contract address include drops every occurrence of an excluded hash", %{conn: conn} do
+      token_a = insert(:token)
+      token_b = insert(:token)
+      token_c = insert(:token)
+
+      transaction = :transaction |> insert() |> with_block()
+
+      for {token, log_index} <- Enum.with_index([token_a, token_b, token_c]) do
+        insert(:token_transfer,
+          token_contract_address: token.contract_address,
+          transaction: transaction,
+          block_number: transaction.block_number,
+          log_index: log_index
+        )
+      end
+
+      request =
+        get(conn, "/api/v2/advanced-filters", %{
+          "token_contract_address_hashes_to_include" =>
+            "#{token_a.contract_address_hash},#{token_a.contract_address_hash},#{token_b.contract_address_hash}",
+          "token_contract_address_hashes_to_exclude" => to_string(token_a.contract_address_hash)
+        })
+
+      assert response = json_response(request, 200)
+
+      assert [item] = response["items"]
+      assert item["token"]["address_hash"] == Address.checksum(token_b.contract_address_hash)
+    end
+
+    test "filter by token contract address keeps the exclusion when it empties the include list", %{conn: conn} do
+      token_a = insert(:token)
+      token_b = insert(:token)
+      token_c = insert(:token)
+
+      transaction = :transaction |> insert() |> with_block()
+
+      for {token, log_index} <- Enum.with_index([token_a, token_b, token_c]) do
+        insert(:token_transfer,
+          token_contract_address: token.contract_address,
+          transaction: transaction,
+          block_number: transaction.block_number,
+          log_index: log_index
+        )
+      end
+
+      request =
+        get(conn, "/api/v2/advanced-filters", %{
+          "token_contract_address_hashes_to_include" =>
+            "#{token_a.contract_address_hash},#{token_a.contract_address_hash}",
+          "token_contract_address_hashes_to_exclude" => to_string(token_a.contract_address_hash)
+        })
+
+      assert response = json_response(request, 200)
+
+      assert response["items"] |> Enum.map(& &1["token"]["address_hash"]) |> Enum.sort() ==
+               Enum.sort([
+                 Address.checksum(token_b.contract_address_hash),
+                 Address.checksum(token_c.contract_address_hash)
+               ])
+    end
+
     test "filter by token contract address exclude", %{conn: conn} do
       token_a = insert(:token)
       token_b = insert(:token)
@@ -1551,6 +1759,39 @@ defmodule BlockScoutWeb.API.V2.AdvancedFilterControllerTest do
       assert response = json_response(request, 200)
       assert response == [%{"method_id" => "0x60fe47b1", "name" => ""}]
     end
+  end
+
+  defp set_denormalization_finished(tt: tt_finished?, transactions: transactions_finished?) do
+    old_tt_finished? = BackgroundMigrations.get_tt_denormalization_finished()
+    old_transactions_finished? = BackgroundMigrations.get_transactions_denormalization_finished()
+
+    BackgroundMigrations.set_tt_denormalization_finished(tt_finished?)
+    BackgroundMigrations.set_transactions_denormalization_finished(transactions_finished?)
+
+    on_exit(fn ->
+      BackgroundMigrations.set_tt_denormalization_finished(old_tt_finished?)
+      BackgroundMigrations.set_transactions_denormalization_finished(old_transactions_finished?)
+    end)
+  end
+
+  defp assert_only_consensus_token_transfers_returned(conn) do
+    consensus_transaction = :transaction |> insert() |> with_block()
+    insert(:token_transfer, transaction: consensus_transaction)
+
+    non_consensus_block = insert(:block, consensus: false)
+    non_consensus_transaction = :transaction |> insert() |> with_block()
+
+    insert(:token_transfer,
+      transaction: non_consensus_transaction,
+      block: non_consensus_block,
+      block_number: non_consensus_block.number,
+      block_consensus: false
+    )
+
+    request = get(conn, "/api/v2/advanced-filters", %{"transaction_types" => "ERC-20"})
+
+    assert response = json_response(request, 200)
+    assert Enum.map(response["items"], & &1["hash"]) == [to_string(consensus_transaction.hash)]
   end
 
   defp check_paginated_response(all_advanced_filters, first_page, second_page) do

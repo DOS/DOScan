@@ -136,6 +136,7 @@ defmodule Explorer.Chain.Address.Schema do
         field(:transactions_count, :integer)
         field(:token_transfers_count, :integer)
         field(:gas_used, :integer)
+        field(:counters_updated_at, :integer) :: Block.block_number() | nil
         field(:ens_domain_name, :string, virtual: true)
         field(:metadata, :any, virtual: true)
         field(:contract_creation_internal_transaction, :map, virtual: true)
@@ -174,7 +175,6 @@ defmodule Explorer.Chain.Address do
   A stored representation of a web3 address.
   """
 
-  require Bitwise
   require Explorer.Chain.Address.Schema
 
   use Explorer.Schema
@@ -191,7 +191,7 @@ defmodule Explorer.Chain.Address do
 
   import Explorer.Chain.SmartContract.Proxy.Models.Implementation, only: [proxy_implementations_association: 0]
 
-  @optional_attrs ~w(contract_code fetched_coin_balance fetched_coin_balance_block_number nonce verified gas_used transactions_count token_transfers_count)a
+  @optional_attrs ~w(contract_code fetched_coin_balance fetched_coin_balance_block_number nonce verified gas_used transactions_count token_transfers_count counters_updated_at)a
   @chain_type_optional_attrs (case @chain_type do
                                 :filecoin ->
                                   ~w(filecoin_id filecoin_robust filecoin_actor_type)a
@@ -210,17 +210,7 @@ defmodule Explorer.Chain.Address do
   """
   @type hash :: Hash.t()
 
-  @derive {Poison.Encoder,
-           except: [
-             :__meta__,
-             :smart_contract,
-             :token,
-             :contract_creation_internal_transaction,
-             :contract_creation_transaction,
-             :names
-           ]}
-
-  @derive {Jason.Encoder,
+  @derive {JSON.Encoder,
            except: [
              :__meta__,
              :smart_contract,
@@ -473,11 +463,9 @@ defmodule Explorer.Chain.Address do
     do: address
 
   def maybe_preload_smart_contract_associations(%__MODULE__{contract_code: _} = address, associations, options) do
-    repo = Chain.select_repo(options)
-
     address
-    |> repo.preload(associations)
-    |> maybe_preload_contract_creation_internal_transaction(repo)
+    |> Chain.select_repo(options).preload(associations)
+    |> maybe_preload_contract_creation_internal_transaction(options)
   end
 
   @doc """
@@ -531,6 +519,13 @@ defmodule Explorer.Chain.Address do
   @doc """
   Lists the top `t:Explorer.Chain.Address.t/0`'s' in descending order based on coin balance and address hash.
 
+  The first page in the default order is served from `Explorer.Chain.Cache.Accounts`
+  when it holds enough entries; otherwise the cache is refilled through
+  `Explorer.Chain.Cache.Accounts.Refresher`, which runs the query once for all
+  requests that miss at the same time.
+
+  Addresses listed in `TOP_ADDRESSES_EXCLUDED_ADDRESSES` (see
+  `excluded_top_addresses/0`) are left out of every page and of the cache.
   """
   @spec list_top_addresses :: [{__MODULE__.t(), non_neg_integer()}]
   def list_top_addresses(options \\ []) do
@@ -542,7 +537,7 @@ defmodule Explorer.Chain.Address do
       |> Accounts.atomic_take_enough()
       |> case do
         nil ->
-          get_addresses(options)
+          Accounts.Refresher.fetch_top_addresses(paging_options.page_size)
 
         accounts ->
           accounts
@@ -550,6 +545,22 @@ defmodule Explorer.Chain.Address do
     else
       fetch_top_addresses(options)
     end
+  end
+
+  @doc """
+  Fetches as many top addresses as `Explorer.Chain.Cache.Accounts` holds from
+  the database and replaces the content of the cache with them.
+
+  This is the cache refill behind `list_top_addresses/1`; request handlers
+  should call that function instead, so concurrent misses share one query.
+  """
+  @spec fetch_and_cache_top_addresses() :: [__MODULE__.t()]
+  def fetch_and_cache_top_addresses do
+    addresses = fetch_top_addresses(paging_options: %PagingOptions{page_size: Accounts.max_size()}, api?: true)
+
+    Accounts.replace(addresses)
+
+    addresses
   end
 
   @doc """
@@ -673,15 +684,6 @@ defmodule Explorer.Chain.Address do
   def eoa_with_code?(%NotLoaded{}), do: nil
   def eoa_with_code?(_), do: false
 
-  defp get_addresses(options) do
-    addresses = fetch_top_addresses(options)
-
-    addresses
-    |> Accounts.update()
-
-    addresses
-  end
-
   @default_sorting [desc: :fetched_coin_balance, asc: :hash]
 
   defp fetch_top_addresses(options) do
@@ -706,11 +708,31 @@ defmodule Explorer.Chain.Address do
           )
 
         base_query
+        |> exclude_configured_top_addresses()
         |> Chain.join_associations(necessity_by_association)
         |> SortingHelper.apply_sorting(sorting_options, @default_sorting)
         |> SortingHelper.page_with_sorting(paging_options, sorting_options, @default_sorting)
         |> Chain.select_repo(options).all()
     end
+  end
+
+  # Leaves the query untouched when `TOP_ADDRESSES_EXCLUDED_ADDRESSES` is unset.
+  @spec exclude_configured_top_addresses(Ecto.Query.t()) :: Ecto.Query.t()
+  defp exclude_configured_top_addresses(query) do
+    case excluded_top_addresses() do
+      [] -> query
+      hashes -> where(query, [a], a.hash not in ^hashes)
+    end
+  end
+
+  @doc """
+  Downcased hashes of the addresses excluded from the top addresses list
+  (`TOP_ADDRESSES_EXCLUDED_ADDRESSES`), for example a protocol reserve whose
+  balance would otherwise sit on top of the ranking.
+  """
+  @spec excluded_top_addresses() :: [String.t()]
+  def excluded_top_addresses do
+    Application.get_env(:explorer, __MODULE__, [])[:excluded_top_addresses] || []
   end
 
   @doc """
@@ -849,7 +871,7 @@ defmodule Explorer.Chain.Address do
   ## Parameters
 
     - `addresses`: An `Explorer.Chain.Address.t/0`, a list of addresses, `[]`, or `nil`
-    - `repo`: The repo module used to execute the query. Defaults to `Explorer.Repo`
+    - `options`: A keyword list of options used to select the repo (for example, `api?: true`)
 
   ## Returns
 
@@ -858,14 +880,14 @@ defmodule Explorer.Chain.Address do
     - A single address with `:contract_creation_internal_transaction`
       populated when the input is a single struct
   """
-  @spec maybe_preload_contract_creation_internal_transaction([__MODULE__.t()] | __MODULE__.t() | nil, module()) ::
+  @spec maybe_preload_contract_creation_internal_transaction([__MODULE__.t()] | __MODULE__.t() | nil, [Chain.api?()]) ::
           [__MODULE__.t()] | __MODULE__.t() | nil
-  def maybe_preload_contract_creation_internal_transaction(addresses, repo \\ Repo)
+  def maybe_preload_contract_creation_internal_transaction(addresses, options)
 
-  def maybe_preload_contract_creation_internal_transaction([], _repo), do: []
-  def maybe_preload_contract_creation_internal_transaction(nil, _repo), do: nil
+  def maybe_preload_contract_creation_internal_transaction([], _options), do: []
+  def maybe_preload_contract_creation_internal_transaction(nil, _options), do: nil
 
-  def maybe_preload_contract_creation_internal_transaction(addresses, repo) when is_list(addresses) do
+  def maybe_preload_contract_creation_internal_transaction(addresses, options) when is_list(addresses) do
     if Application.get_env(:explorer, :api_disable_contract_creation_internal_transaction_association, false) do
       addresses
     else
@@ -873,21 +895,21 @@ defmodule Explorer.Chain.Address do
 
       internal_transactions_map =
         contract_creation_internal_transaction_preload_query()
-        |> InternalTransaction.where_address_match(:created_contract_address, address_hashes)
-        |> repo.all()
-        |> InternalTransaction.preload_addresses([], repo)
+        |> InternalTransaction.where_address_match_by_hash(:created_contract_address, address_hashes, options)
+        |> Chain.select_repo(options).all()
+        |> InternalTransaction.preload_addresses([], Chain.select_repo(options))
         |> Map.new(&{&1.created_contract_address_hash, &1})
 
       Enum.map(addresses, &%{&1 | contract_creation_internal_transaction: internal_transactions_map[&1.hash]})
     end
   end
 
-  def maybe_preload_contract_creation_internal_transaction(address, repo) do
+  def maybe_preload_contract_creation_internal_transaction(address, options) do
     if Application.get_env(:explorer, :api_disable_contract_creation_internal_transaction_association, false) do
       address
     else
       [address]
-      |> maybe_preload_contract_creation_internal_transaction(repo)
+      |> maybe_preload_contract_creation_internal_transaction(options)
       |> List.first()
     end
   end
@@ -1022,7 +1044,7 @@ defmodule Explorer.Chain.Address do
   def creation_internal_transaction_query(address_hash) do
     InternalTransaction
     |> InternalTransaction.join_transaction_query()
-    |> InternalTransaction.where_address_match(:created_contract_address, address_hash)
+    |> InternalTransaction.where_address_match_by_hash(:created_contract_address, address_hash, [])
     |> where(as(:transaction).status == ^:ok)
     |> order_by([it], desc: it.block_number, desc: it.transaction_index, desc: it.index)
     |> limit(1)
@@ -1058,7 +1080,7 @@ defmodule Explorer.Chain.Address do
     |> Chain.select_repo(options).one()
     |> then(fn address ->
       if Keyword.get(options, :preload_contract_creation_internal_transaction, false) do
-        Address.maybe_preload_contract_creation_internal_transaction(address)
+        Address.maybe_preload_contract_creation_internal_transaction(address, options)
       else
         address
       end

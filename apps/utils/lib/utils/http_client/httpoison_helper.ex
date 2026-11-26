@@ -17,6 +17,33 @@ defmodule Utils.HttpClient.HTTPoisonHelper do
     |> add_follow_redirect_option(options[:follow_redirect])
     |> add_insecure_option(options[:insecure])
     |> add_params_option(options[:params])
+    |> add_max_body_length_option(options[:max_body_length])
+    |> add_hostname_option(options[:hostname], options[:insecure])
+  end
+
+  # Set by `Utils.HttpClient.SafeFetch` when the URL host is a validated IP literal: hackney
+  # sends `server_name_indication` as SNI and verifies the certificate against it, without the
+  # trailing dot of a fully qualified name, as hackney itself does for a hostname. The request
+  # is kept on HTTP/1.1 because over HTTP/2 hackney drops the `Host` header and builds
+  # `:authority` from the connection host, i.e. from the IP literal. With `:ssl` set, HTTPoison
+  # merges hackney's `verify_peer` defaults into the ssl options before hackney sees the
+  # `:insecure` flag, so an insecure request has to disable verification here.
+  defp add_hostname_option(options, nil, _insecure), do: options
+
+  defp add_hostname_option(options, hostname, insecure) do
+    sni = [server_name_indication: hostname |> String.trim_trailing(".") |> String.to_charlist()]
+
+    options
+    |> Keyword.put(:ssl, if(insecure == true, do: sni ++ [verify: :verify_none], else: sni))
+    |> Keyword.put(:hackney, [{:protocols, [:http1]} | options[:hackney] || []])
+  end
+
+  # Caps the buffered response body at the transport level: hackney aborts the request
+  # with `{:error, :body_too_large}` instead of downloading the whole body first.
+  defp add_max_body_length_option(options, nil), do: options
+
+  defp add_max_body_length_option(options, max_body_length) do
+    Keyword.put(options, :hackney, [{:max_body_size, max_body_length} | options[:hackney] || []])
   end
 
   defp add_recv_timeout_option(options, nil), do: options

@@ -17,6 +17,9 @@ defmodule Explorer.ChainSpec.GenesisData do
   alias Explorer.ChainSpec.Parity.Importer
   alias Explorer.HttpClient
   alias Utils.ConfigHelper, as: UtilsConfigHelper
+  alias Utils.LocalFile
+
+  @local_file_extensions [".json"]
 
   def start_link(opts) do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
@@ -163,21 +166,31 @@ defmodule Explorer.ChainSpec.GenesisData do
     end
   end
 
-  # Reads and parses JSON data from a file.
-  @spec fetch_from_file(binary()) :: {:ok, list() | map()} | {:error, Jason.DecodeError.t()}
-  # sobelow_skip ["Traversal"]
+  # Reads and parses JSON data from a local file.
+  #
+  # To keep the path from being used to read arbitrary local files, only
+  # regular `.json` files are read, and the content must be a valid JSON
+  # object or array. The decoding error is not propagated so that the file
+  # content cannot end up in the logs.
+  @spec fetch_from_file(binary()) ::
+          {:ok, list() | map()} | {:error, LocalFile.error_reason() | :invalid_json_content}
   defp fetch_from_file(path) do
-    with {:ok, data} <- File.read(path) do
-      Jason.decode(data)
+    with {:ok, data} <- LocalFile.read(path, @local_file_extensions),
+         {:ok, decoded} when is_map(decoded) or is_list(decoded) <- Utils.JSON.decode(data) do
+      {:ok, decoded}
+    else
+      {:error, reason} when is_atom(reason) -> {:error, reason}
+      {:error, {:invalid_file_extension, _, _} = reason} -> {:error, reason}
+      _ -> {:error, :invalid_json_content}
     end
   end
 
   # Fetches JSON data from a provided URL.
-  @spec fetch_from_url(binary()) :: {:ok, list() | map()} | {:error, Jason.DecodeError.t() | any()}
+  @spec fetch_from_url(binary()) :: {:ok, list() | map()} | {:error, Exception.t() | any()}
   defp fetch_from_url(url) do
     case HttpClient.get(url, [], timeout: 60_000, recv_timeout: 60_000) do
       {:ok, %{body: body, status_code: 200}} ->
-        {:ok, Jason.decode!(body)}
+        {:ok, Utils.JSON.decode!(body)}
 
       reason ->
         {:error, reason}
@@ -305,7 +318,7 @@ defmodule Explorer.ChainSpec.GenesisData do
         constructor_arguments: nil,
         external_libraries: [],
         secondary_sources: [],
-        abi: Jason.decode!(contract["abi"]),
+        abi: Utils.JSON.decode!(contract["abi"]),
         verified_via_sourcify: false,
         verified_via_eth_bytecode_db: false,
         verified_via_verifier_alliance: false,

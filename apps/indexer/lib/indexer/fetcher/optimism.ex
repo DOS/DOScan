@@ -19,10 +19,9 @@ defmodule Indexer.Fetcher.Optimism do
 
   alias EthereumJSONRPC.Block.{ByHash, ByNumber}
   alias EthereumJSONRPC.{Blocks, Contract}
-  alias Explorer.Application.Constants
   alias Explorer.Chain.Cache.ChainId
   alias Explorer.Chain.Cache.Counters.LastFetchedCounter
-  alias Explorer.Chain.Optimism.Withdrawal
+  alias Explorer.Chain.Optimism.SuperchainConfig
   alias Explorer.Repo
   alias Indexer.Fetcher.RollupL1ReorgMonitor
   alias Indexer.Helper
@@ -110,7 +109,7 @@ defmodule Indexer.Fetcher.Optimism do
       end
 
     optimism_env = Application.get_all_env(:indexer)[__MODULE__]
-    system_config = optimism_env[:optimism_l1_system_config]
+    system_config = SuperchainConfig.optimism_l1_system_config_contract()
     optimism_l1_rpc = l1_rpc_url()
 
     with {:system_config_valid, true} <- {:system_config_valid, Helper.address_correct?(system_config)},
@@ -191,12 +190,13 @@ defmodule Indexer.Fetcher.Optimism do
   end
 
   @doc """
-    Reads some public getters of SystemConfig contract and returns retrieved values.
-    Gets `OptimismPortal` contract address from the `SystemConfig` contract and
-    the number of a start block (from which all Optimism fetchers should start).
+    Returns `OptimismPortal` contract address and the number of a start block
+    (from which all Optimism fetchers should start).
 
-    If SystemConfig has obsolete implementation, the values are fallen back from the corresponding
-    env variables (INDEXER_OPTIMISM_L1_PORTAL_CONTRACT and INDEXER_OPTIMISM_L1_START_BLOCK).
+    The configured values (`INDEXER_OPTIMISM_L1_PORTAL_CONTRACT` and `INDEXER_OPTIMISM_L1_START_BLOCK`
+    env variables, or the corresponding Superchain config values) always take priority. Only the values
+    which are not configured are read from the `optimismPortal()` and `startBlock()` public getters
+    of the `SystemConfig` contract. The RPC call is skipped when both values are configured.
 
     ## Parameters
     - `contract_address`: An address of SystemConfig contract.
@@ -208,6 +208,31 @@ defmodule Indexer.Fetcher.Optimism do
   """
   @spec read_system_config(binary(), list()) :: {binary(), non_neg_integer()} | nil
   def read_system_config(contract_address, json_rpc_named_arguments) do
+    configured_portal = SuperchainConfig.optimism_l1_portal_contract()
+    configured_start_block = positive_integer_or_nil(SuperchainConfig.optimism_l1_batch_start_block())
+
+    {optimism_portal, start_block} =
+      if Helper.address_correct?(configured_portal) and not is_nil(configured_start_block) do
+        {configured_portal, configured_start_block}
+      else
+        {portal_from_chain, start_block_from_chain} =
+          read_system_config_getters(contract_address, json_rpc_named_arguments)
+
+        optimism_portal = if Helper.address_correct?(configured_portal), do: configured_portal, else: portal_from_chain
+
+        {optimism_portal, configured_start_block || start_block_from_chain}
+      end
+
+    if Helper.address_correct?(optimism_portal) and !is_nil(start_block) do
+      {String.downcase(optimism_portal), start_block}
+    end
+  end
+
+  # Reads the `optimismPortal()` and `startBlock()` public getters of the SystemConfig contract.
+  # Returns `{portal, start_block}` where each element is `nil` when it cannot be read
+  # (e.g. the getter is absent in an obsolete SystemConfig implementation or the request fails).
+  @spec read_system_config_getters(binary(), list()) :: {binary() | nil, non_neg_integer() | nil}
+  defp read_system_config_getters(contract_address, json_rpc_named_arguments) do
     requests = [
       # optimismPortal() public getter
       Contract.eth_call_request("0x0a49cb03", contract_address, 0, nil, nil),
@@ -217,53 +242,34 @@ defmodule Indexer.Fetcher.Optimism do
 
     error_message = &"Cannot call public getters of SystemConfig. Error: #{inspect(&1)}"
 
-    env = Application.get_all_env(:indexer)[__MODULE__]
-    fallback_start_block = env[:start_block_l1]
-
-    {optimism_portal, start_block} =
-      case Helper.repeated_call(
-             &json_rpc/2,
-             [requests, json_rpc_named_arguments],
-             error_message,
-             Helper.finite_retries_number()
-           ) do
-        {:ok, responses} ->
-          optimism_portal_result = Map.get(Enum.at(responses, 0), :result)
-
-          optimism_portal =
-            with {:nil_result, true, _} <- {:nil_result, is_nil(optimism_portal_result), optimism_portal_result},
-                 {:fallback_defined, true} <- {:fallback_defined, Helper.address_correct?(env[:portal])} do
-              env[:portal]
-            else
-              {:nil_result, false, portal} ->
-                "0x000000000000000000000000" <> optimism_portal = portal
-                "0x" <> optimism_portal
-
-              {:fallback_defined, false} ->
-                nil
-            end
-
-          start_block =
-            responses
-            |> Enum.at(1)
-            |> Map.get(:result, fallback_start_block)
-            |> quantity_to_integer()
-
-          if not is_nil(optimism_portal) do
-            # we save the OptimismPortal contract address to use it in other modules (e.g. by `BlockScoutWeb.API.V2.OptimismView`)
-            Constants.set_constant_value(Withdrawal.portal_contract_address_constant(), optimism_portal)
+    case Helper.repeated_call(
+           &json_rpc/2,
+           [requests, json_rpc_named_arguments],
+           error_message,
+           Helper.finite_retries_number()
+         ) do
+      {:ok, responses} ->
+        optimism_portal =
+          case Map.get(Enum.at(responses, 0), :result) do
+            "0x000000000000000000000000" <> portal -> "0x" <> portal
+            _ -> nil
           end
 
-          {optimism_portal, start_block}
+        start_block =
+          responses
+          |> Enum.at(1)
+          |> Map.get(:result)
+          |> quantity_to_integer()
 
-        _ ->
-          {env[:portal], fallback_start_block}
-      end
+        {optimism_portal, start_block}
 
-    if Helper.address_correct?(optimism_portal) and !is_nil(start_block) do
-      {String.downcase(optimism_portal), start_block}
+      _ ->
+        {nil, nil}
     end
   end
+
+  defp positive_integer_or_nil(value) when is_integer(value) and value > 0, do: value
+  defp positive_integer_or_nil(_), do: nil
 
   @doc """
     Returns L1 RPC URL for an OP module.
@@ -282,8 +288,7 @@ defmodule Indexer.Fetcher.Optimism do
   """
   @spec requires_l1_reorg_monitor?() :: boolean()
   def requires_l1_reorg_monitor? do
-    optimism_config = Application.get_all_env(:indexer)[__MODULE__]
-    not is_nil(optimism_config[:optimism_l1_system_config])
+    not is_nil(SuperchainConfig.optimism_l1_system_config_contract())
   end
 
   @doc """

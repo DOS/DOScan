@@ -36,8 +36,10 @@ defmodule Indexer.Fetcher.Optimism.TransactionBatch do
   alias Explorer.Chain.{Block, Hash}
   alias Explorer.Chain.Events.Publisher
   alias Explorer.Chain.Optimism.{FrameSequence, FrameSequenceBlob}
+  alias Explorer.Chain.Optimism.SuperchainConfig
   alias Explorer.Chain.Optimism.TransactionBatch, as: OptimismTransactionBatch
-  alias Indexer.Fetcher.{Optimism, RollupL1ReorgMonitor}
+  alias Indexer.Fetcher.Optimism
+  alias Indexer.Fetcher.RollupL1ReorgMonitor
   alias Indexer.Helper
   alias Indexer.Prometheus.Instrumenter
   alias Indexer.RollupReorgMonitorQueue
@@ -83,15 +85,16 @@ defmodule Indexer.Fetcher.Optimism.TransactionBatch do
         %{json_rpc_named_arguments_l2: json_rpc_named_arguments_l2} = state
       ) do
     env = Application.get_all_env(:indexer)[__MODULE__]
+    genesis_block_l2 = SuperchainConfig.optimism_l2_batch_genesis_block_number()
 
     optimism_env = Application.get_all_env(:indexer)[Indexer.Fetcher.Optimism]
-    system_config = optimism_env[:optimism_l1_system_config]
+    system_config = SuperchainConfig.optimism_l1_system_config_contract()
     optimism_l1_rpc = l1_rpc_url()
 
     with {:system_config_valid, true} <-
            {:system_config_valid, Helper.address_correct?(system_config)},
          {:genesis_block_l2_invalid, false} <-
-           {:genesis_block_l2_invalid, is_nil(env[:genesis_block_l2]) or env[:genesis_block_l2] < 0},
+           {:genesis_block_l2_invalid, is_nil(genesis_block_l2) or genesis_block_l2 < 0},
          _ <- RollupL1ReorgMonitor.wait_for_start(__MODULE__),
          {:rpc_l1_undefined, false} <- {:rpc_l1_undefined, is_nil(optimism_l1_rpc)},
          json_rpc_named_arguments = Helper.l1_json_rpc_named_arguments(optimism_l1_rpc),
@@ -142,7 +145,7 @@ defmodule Indexer.Fetcher.Optimism.TransactionBatch do
          end_block: last_safe_block,
          chunk_size: chunk_size,
          incomplete_channels: %{},
-         genesis_block_l2: env[:genesis_block_l2],
+         genesis_block_l2: genesis_block_l2,
          block_duration: optimism_env[:block_duration],
          json_rpc_named_arguments: json_rpc_named_arguments,
          json_rpc_named_arguments_l2: json_rpc_named_arguments_l2,
@@ -772,7 +775,7 @@ defmodule Indexer.Fetcher.Optimism.TransactionBatch do
   end
 
   defp eigenda_blob_to_input(transaction_input, offset, transaction_hash, blobs_api_url) when blobs_api_url != "" do
-    <<_::binary-size(offset), cert::binary>> = transaction_input
+    <<_::binary-size(^offset), cert::binary>> = transaction_input
 
     url = blobs_api_url <> "/0x" <> Base.encode16(cert, case: :lower)
 
@@ -1562,13 +1565,18 @@ defmodule Indexer.Fetcher.Optimism.TransactionBatch do
   # Gets the number of a start block (from which this fetcher should start),
   # the inbox address, and the batcher (batch submitter) address.
   #
-  # If SystemConfig has obsolete implementation, the values are fallen back from the corresponding
-  # env variables (INDEXER_OPTIMISM_L1_START_BLOCK, INDEXER_OPTIMISM_L1_BATCH_INBOX, INDEXER_OPTIMISM_L1_BATCH_SUBMITTER).
-  #
-  # Moreover, if INDEXER_OPTIMISM_L1_BATCH_INBOX and/or INDEXER_OPTIMISM_L1_BATCH_SUBMITTER are explicitly set,
-  # they take precedence over the corresponding values read from the SystemConfig contract. This is needed when
+  # The configured values (INDEXER_OPTIMISM_L1_START_BLOCK, INDEXER_OPTIMISM_L1_BATCH_INBOX,
+  # INDEXER_OPTIMISM_L1_BATCH_SUBMITTER env variables, or the corresponding Superchain config values)
+  # always take precedence over the values read from the SystemConfig contract. This is needed when
   # the on-chain SystemConfig `batchInbox` (or `batcherHash`) diverges from the address the batcher actually uses,
   # e.g. during an inbox migration where the SystemConfig value is updated ahead of the batcher.
+  # The RPC call is skipped entirely when all three values are configured.
+  #
+  # Each getter is handled independently: only the values which are not configured are taken from the contract,
+  # and a getter which is unavailable (the call reverts or the whole request fails) leaves only its own value
+  # undefined. In particular, SystemConfig v4.0.0 (OP Stack Upgrade 20) removed the `batchInbox()` getter,
+  # so the inbox address must be configured for such chains, whereas `startBlock()` and `batcherHash()`
+  # are still readable.
   #
   # ## Parameters
   # - `contract_address`: An address of SystemConfig contract.
@@ -1579,70 +1587,96 @@ defmodule Indexer.Fetcher.Optimism.TransactionBatch do
   # - `nil` in case of error.
   @spec read_system_config(String.t(), EthereumJSONRPC.json_rpc_named_arguments()) ::
           {non_neg_integer(), String.t(), String.t()} | nil
-  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   defp read_system_config(contract_address, json_rpc_named_arguments) do
-    requests = [
-      # startBlock() public getter
-      Contract.eth_call_request("0x48cd4cb1", contract_address, 0, nil, nil),
-      # batchInbox() public getter
-      Contract.eth_call_request("0xdac6e63a", contract_address, 1, nil, nil),
-      # batcherHash() public getter
-      Contract.eth_call_request("0xe81b2c6d", contract_address, 2, nil, nil)
-    ]
+    start_block_request_id = 0
+    batch_inbox_request_id = 1
+    batch_submitter_request_id = 2
 
-    error_message = &"Cannot call public getters of SystemConfig. Error: #{inspect(&1)}"
+    # The SuperchainConfig getters already apply the env-over-TOML priority.
+    configured_start_block = positive_integer_or_nil(SuperchainConfig.optimism_l1_batch_start_block())
+    configured_inbox = SuperchainConfig.optimism_l1_batch_inbox()
+    configured_submitter = SuperchainConfig.optimism_l1_batch_submitter()
 
-    env = Application.get_all_env(:indexer)[__MODULE__]
-    fallback_start_block = Application.get_all_env(:indexer)[Indexer.Fetcher.Optimism][:start_block_l1]
+    result_by_id =
+      if all_system_config_values_configured?(configured_start_block, configured_inbox, configured_submitter) do
+        %{}
+      else
+        requests = [
+          # startBlock() public getter
+          Contract.eth_call_request("0x48cd4cb1", contract_address, start_block_request_id, nil, nil),
+          # batchInbox() public getter (removed in SystemConfig v4.0.0, so the call can revert)
+          Contract.eth_call_request("0xdac6e63a", contract_address, batch_inbox_request_id, nil, nil),
+          # batcherHash() public getter
+          Contract.eth_call_request("0xe81b2c6d", contract_address, batch_submitter_request_id, nil, nil)
+        ]
 
-    {start_block, batch_inbox, batch_submitter} =
-      case Helper.repeated_call(
-             &json_rpc/2,
-             [requests, json_rpc_named_arguments],
-             error_message,
-             Helper.finite_retries_number()
-           ) do
-        {:ok, responses} ->
-          start_block =
-            responses
-            |> Enum.at(0)
-            |> Map.get(:result, fallback_start_block)
-            |> quantity_to_integer()
-
-          inbox_result = Map.get(Enum.at(responses, 1), :result)
-          submitter_result = Map.get(Enum.at(responses, 2), :result)
-
-          {batch_inbox, batch_submitter} =
-            with {:nil_result, true, _, _} <-
-                   {:nil_result, is_nil(inbox_result) or is_nil(submitter_result), inbox_result, submitter_result},
-                 {:fallback_defined, true} <-
-                   {:fallback_defined,
-                    Helper.address_correct?(env[:inbox]) and Helper.address_correct?(env[:submitter])} do
-              {env[:inbox], env[:submitter]}
-            else
-              {:nil_result, false, inbox, submitter} ->
-                "0x000000000000000000000000" <> batch_inbox = inbox
-                "0x000000000000000000000000" <> batch_submitter = submitter
-                {"0x" <> batch_inbox, "0x" <> batch_submitter}
-
-              {:fallback_defined, false} ->
-                {nil, nil}
-            end
-
-          {start_block, batch_inbox, batch_submitter}
-
-        _ ->
-          {fallback_start_block, env[:inbox], env[:submitter]}
+        read_system_config_getters(requests, json_rpc_named_arguments)
       end
 
-    # An explicitly configured inbox/submitter overrides the value read from the SystemConfig contract.
-    # Only kicks in when the corresponding env variable holds a correct address, so the on-chain value
-    # is still used by default.
-    batch_inbox = if Helper.address_correct?(env[:inbox]), do: env[:inbox], else: batch_inbox
-    batch_submitter = if Helper.address_correct?(env[:submitter]), do: env[:submitter], else: batch_submitter
+    start_block = configured_start_block || quantity_to_integer(result_by_id[start_block_request_id])
+    batch_inbox = system_config_address(configured_inbox, result_by_id[batch_inbox_request_id])
+    batch_submitter = system_config_address(configured_submitter, result_by_id[batch_submitter_request_id])
+
+    log_missing_batch_inbox(batch_inbox, Map.has_key?(result_by_id, batch_submitter_request_id))
 
     if !is_nil(start_block) and Helper.address_correct?(batch_inbox) and Helper.address_correct?(batch_submitter) do
       {start_block, String.downcase(batch_inbox), String.downcase(batch_submitter)}
+    end
+  end
+
+  # Calls the given SystemConfig getters and returns a map of request id to getter result.
+  # The map is empty when the request fails. A reverted getter is present with a `nil` result.
+  @spec read_system_config_getters([map()], EthereumJSONRPC.json_rpc_named_arguments()) :: %{
+          non_neg_integer() => String.t() | nil
+        }
+  defp read_system_config_getters(requests, json_rpc_named_arguments) do
+    error_message = &"Cannot call public getters of SystemConfig. Error: #{inspect(&1)}"
+
+    case Helper.repeated_call(
+           &json_rpc/2,
+           [requests, json_rpc_named_arguments],
+           error_message,
+           Helper.finite_retries_number()
+         ) do
+      {:ok, responses} -> Map.new(responses, &{&1.id, Map.get(&1, :result)})
+      _ -> %{}
+    end
+  end
+
+  defp positive_integer_or_nil(value) when is_integer(value) and value > 0, do: value
+  defp positive_integer_or_nil(_), do: nil
+
+  @spec all_system_config_values_configured?(non_neg_integer() | nil, String.t() | nil, String.t() | nil) ::
+          boolean()
+  defp all_system_config_values_configured?(start_block, inbox, submitter) do
+    not is_nil(start_block) and Helper.address_correct?(inbox) and Helper.address_correct?(submitter)
+  end
+
+  # Logs an error when the batch inbox is unknown although the SystemConfig getters were readable
+  # (i.e. the `batchInbox()` getter itself is absent).
+  @spec log_missing_batch_inbox(String.t() | nil, boolean()) :: :ok
+  defp log_missing_batch_inbox(nil, true) do
+    Logger.error(
+      "The batchInbox() getter of SystemConfig is not available (it was removed in SystemConfig v4.0.0 by OP Stack Upgrade 20). Please, define the batch inbox address via INDEXER_OPTIMISM_L1_BATCH_INBOX env variable or batch_inbox_addr in the Superchain config."
+    )
+  end
+
+  defp log_missing_batch_inbox(_batch_inbox, _getters_readable?), do: :ok
+
+  # Returns the configured address when it is correct (it takes precedence). Otherwise, returns
+  # the address read from a SystemConfig getter, or `nil` when the getter result is absent
+  # (e.g. the call reverted).
+  @spec system_config_address(String.t() | nil, String.t() | nil) :: String.t() | nil
+  defp system_config_address(configured_address, getter_result) do
+    cond do
+      Helper.address_correct?(configured_address) ->
+        configured_address
+
+      is_binary(getter_result) and String.starts_with?(getter_result, "0x000000000000000000000000") ->
+        "0x" <> String.slice(getter_result, 26..-1//1)
+
+      true ->
+        nil
     end
   end
 

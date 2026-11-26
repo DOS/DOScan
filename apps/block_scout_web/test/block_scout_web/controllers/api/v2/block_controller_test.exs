@@ -1,11 +1,16 @@
 # SPDX-License-Identifier: LicenseRef-Blockscout
 defmodule BlockScoutWeb.API.V2.BlockControllerTest do
   use BlockScoutWeb.ConnCase
-  use Utils.CompileTimeEnvHelper, chain_type: [:explorer, :chain_type]
+
+  use Utils.CompileTimeEnvHelper,
+    chain_type: [:explorer, :chain_type],
+    chain_identity: [:explorer, :chain_identity]
 
   alias Explorer.Chain.{Address, Block, InternalTransaction, Transaction, Withdrawal}
   alias Explorer.Chain.Beacon.Deposit, as: BeaconDeposit
   alias Explorer.Chain.Cache.{BlockNumber, Counters.AverageBlockTime}
+
+  @page_size 50
 
   setup do
     Supervisor.terminate_child(Explorer.Supervisor, Explorer.Chain.Cache.Blocks.child_id())
@@ -223,6 +228,55 @@ defmodule BlockScoutWeb.API.V2.BlockControllerTest do
                  | _
                ]
              } = json_response(request, 422)
+    end
+
+    # Regression: `select_block_type/1` marks `:nephews` as `:required`, and
+    # `nephews` is a `has_many through`. Joining a to-many association repeats the
+    # parent row per child, so the `limit/2` in `Explorer.Chain.fetch_blocks/4`
+    # used to count joined rows rather than blocks and returned a short page.
+    test "type=uncle returns a full page when every uncle has a single nephew", %{conn: conn} do
+      for _ <- 1..(@page_size + 10), do: insert_uncle_with_nephews(1)
+
+      response = json_response(get(conn, "/api/v2/blocks", %{"type" => "uncle"}), 200)
+
+      assert length(response["items"]) == @page_size
+      refute is_nil(response["next_page_params"])
+    end
+
+    test "type=uncle returns a full page when uncles have several nephews", %{conn: conn} do
+      for _ <- 1..(@page_size + 10), do: insert_uncle_with_nephews(2)
+
+      response = json_response(get(conn, "/api/v2/blocks", %{"type" => "uncle"}), 200)
+
+      assert length(response["items"]) == @page_size
+      refute is_nil(response["next_page_params"])
+    end
+
+    test "type=uncle returns every uncle once regardless of nephew count", %{conn: conn} do
+      for _ <- 1..10, do: insert_uncle_with_nephews(3)
+
+      response = json_response(get(conn, "/api/v2/blocks", %{"type" => "uncle"}), 200)
+
+      hashes = Enum.map(response["items"], & &1["hash"])
+
+      assert length(hashes) == 10
+      assert hashes == Enum.uniq(hashes)
+    end
+
+    # The default listing marks the to-many `:transactions` and `:rewards` as
+    # `:optional`. They must stay preloaded rather than joined, otherwise the
+    # `limit/2` counts joined rows and the page comes back short — the same
+    # failure the `type=uncle` cases above cover for `:required`.
+    test "a full page is returned when blocks carry several transactions", %{conn: conn} do
+      for _ <- 1..(@page_size + 10) do
+        block = insert(:block)
+        for _ <- 1..3, do: :transaction |> insert() |> with_block(block)
+      end
+
+      response = json_response(get(conn, "/api/v2/blocks"), 200)
+
+      assert length(response["items"]) == @page_size
+      refute is_nil(response["next_page_params"])
     end
   end
 
@@ -940,7 +994,7 @@ defmodule BlockScoutWeb.API.V2.BlockControllerTest do
       )
 
       internal_transactions =
-        51..1
+        51..1//-1
         |> Enum.map(fn index ->
           transaction =
             :transaction
@@ -964,6 +1018,93 @@ defmodule BlockScoutWeb.API.V2.BlockControllerTest do
       assert response_2nd_page = json_response(request_2nd_page, 200)
 
       check_paginated_response(response, response_2nd_page, internal_transactions)
+    end
+
+    test "returns pending status when block is in pending_block_operations", %{conn: conn} do
+      block = insert(:block)
+
+      request = get(conn, "/api/v2/blocks/#{block.hash}/internal-transactions")
+
+      assert response = json_response(request, 200)
+      assert response["items"] == []
+      assert response["next_page_params"] == nil
+      assert response["meta"]["status"] == 1
+      assert is_nil(response["meta"]["message"])
+
+      insert(:pending_block_operation, block_hash: block.hash, block_number: block.number)
+
+      request = get(conn, "/api/v2/blocks/#{block.hash}/internal-transactions")
+
+      assert response = json_response(request, 200)
+      assert response["items"] == []
+      assert response["next_page_params"] == nil
+      assert response["meta"]["status"] == 2
+
+      assert response["meta"]["message"] ==
+               "Some internal transactions within this block range have not yet been processed"
+    end
+
+    test "returns pending status when block has pending transaction operations", %{conn: conn} do
+      block = insert(:block)
+      transaction = insert(:transaction) |> with_block(block)
+
+      request = get(conn, "/api/v2/blocks/#{block.hash}/internal-transactions")
+
+      assert response = json_response(request, 200)
+      assert response["items"] == []
+      assert response["next_page_params"] == nil
+      assert response["meta"]["status"] == 1
+      assert is_nil(response["meta"]["message"])
+
+      insert(:pending_transaction_operation, transaction_hash: transaction.hash)
+
+      request = get(conn, "/api/v2/blocks/#{block.hash}/internal-transactions")
+
+      assert response = json_response(request, 200)
+      assert response["items"] == []
+      assert response["next_page_params"] == nil
+      assert response["meta"]["status"] == 2
+
+      assert response["meta"]["message"] ==
+               "Some internal transactions within this block range have not yet been processed"
+    end
+
+    test "include_zero_value=false excludes zero-value call internal transactions", %{conn: conn} do
+      block = insert(:block)
+
+      transaction =
+        :transaction
+        |> insert()
+        |> with_block(block)
+
+      insert(:internal_transaction,
+        transaction: transaction,
+        index: 1,
+        block_number: transaction.block_number,
+        transaction_index: transaction.index,
+        type: :call,
+        value: Decimal.new(0)
+      )
+
+      insert(:internal_transaction,
+        transaction: transaction,
+        index: 2,
+        block_number: transaction.block_number,
+        transaction_index: transaction.index,
+        type: :call,
+        value: Decimal.new(1)
+      )
+
+      request =
+        get(conn, "/api/v2/blocks/#{block.hash}/internal-transactions", %{"include_zero_value" => "false"})
+
+      assert response = json_response(request, 200)
+      assert Enum.count(response["items"]) == 1
+      assert List.first(response["items"])["index"] == 2
+
+      request_default = get(conn, "/api/v2/blocks/#{block.hash}/internal-transactions")
+      assert response_default = json_response(request_default, 200)
+      assert Enum.count(response_default["items"]) == 2
     end
   end
 
@@ -1040,6 +1181,16 @@ defmodule BlockScoutWeb.API.V2.BlockControllerTest do
         check_paginated_response(response, response_2nd_page, deposits)
       end
     end
+  end
+
+  defp insert_uncle_with_nephews(nephew_count) do
+    uncle = insert(:block, consensus: false)
+
+    for index <- 0..(nephew_count - 1) do
+      insert(:block_second_degree_relation, uncle_hash: uncle.hash, nephew: insert(:block), index: index)
+    end
+
+    uncle
   end
 
   defp compare_item(%Block{} = block, json) do
@@ -1163,6 +1314,51 @@ defmodule BlockScoutWeb.API.V2.BlockControllerTest do
       test "returns 422 for non-integer batch_number_param", %{conn: conn} do
         request = get(conn, "/api/v2/blocks/arbitrum-batch/invalid")
         assert %{"errors" => [_]} = json_response(request, 422)
+      end
+    end
+
+    # The confirmation of a rollup block comes from the table of confirmations. A
+    # row of the table confirms the rollup block `top` and all rollup blocks below
+    # it. The owner of a block is the row with the lowest `top` not below the
+    # block.
+    describe "/blocks/{block_hash_or_number} with Arbitrum confirmations" do
+      test "shows the confirmation transaction of a confirmed block", %{conn: conn} do
+        block = insert(:block, consensus: true)
+        confirmation = insert(:arbitrum_lifecycle_transaction)
+        insert(:arbitrum_rollup_block_confirmation, top: block.number + 5, confirmation_id: confirmation.id)
+
+        request = get(conn, "/api/v2/blocks/#{block.number}")
+        assert response = json_response(request, 200)
+        assert response["arbitrum"]["confirmation_transaction"]["hash"] == to_string(confirmation.hash)
+        assert response["arbitrum"]["status"] == "Confirmed on base"
+      end
+
+      test "shows the confirmation with the lowest top not below the block", %{conn: conn} do
+        block = insert(:block, consensus: true)
+        owner = insert(:arbitrum_lifecycle_transaction)
+        later_confirmation = insert(:arbitrum_lifecycle_transaction)
+
+        insert(:arbitrum_rollup_block_confirmation,
+          top: block.number - 1,
+          confirmation_id: insert(:arbitrum_lifecycle_transaction).id
+        )
+
+        insert(:arbitrum_rollup_block_confirmation, top: block.number, confirmation_id: owner.id)
+        insert(:arbitrum_rollup_block_confirmation, top: block.number + 10, confirmation_id: later_confirmation.id)
+
+        request = get(conn, "/api/v2/blocks/#{block.number}")
+        assert response = json_response(request, 200)
+        assert response["arbitrum"]["confirmation_transaction"]["hash"] == to_string(owner.hash)
+      end
+
+      test "shows no confirmation transaction for a block above the highest confirmed block", %{conn: conn} do
+        block = insert(:block, consensus: true)
+        insert(:arbitrum_rollup_block_confirmation, top: block.number - 1)
+
+        request = get(conn, "/api/v2/blocks/#{block.number}")
+        assert response = json_response(request, 200)
+        assert is_nil(response["arbitrum"]["confirmation_transaction"]["hash"])
+        assert response["arbitrum"]["status"] == "Processed on rollup"
       end
     end
   end

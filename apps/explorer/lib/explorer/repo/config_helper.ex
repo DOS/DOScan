@@ -43,9 +43,6 @@ defmodule Explorer.Repo.ConfigHelper do
       UtilsConfigHelper.parse_url_env_var("DATABASE_READ_ONLY_API_URL") ||
         UtilsConfigHelper.parse_url_env_var("DATABASE_URL")
 
-  def get_mud_db_url,
-    do: UtilsConfigHelper.parse_url_env_var("MUD_DATABASE_URL") || UtilsConfigHelper.parse_url_env_var("DATABASE_URL")
-
   def get_event_notification_db_url,
     do: UtilsConfigHelper.parse_url_env_var("DATABASE_EVENT_URL") || UtilsConfigHelper.parse_url_env_var("DATABASE_URL")
 
@@ -64,7 +61,11 @@ defmodule Explorer.Repo.ConfigHelper do
 
     Application.put_env(:explorer, module, merged)
 
-    {:ok, opts |> Keyword.put(:url, remove_search_path(db_url)) |> Keyword.merge(Keyword.take(merged, [:search_path]))}
+    {:ok,
+     opts
+     |> Keyword.put(:url, remove_search_path(db_url))
+     |> Keyword.merge(Keyword.take(merged, [:search_path]))
+     |> Keyword.put_new(:types, Explorer.Repo.PostgrexTypes)}
   end
 
   @doc """
@@ -94,6 +95,10 @@ defmodule Explorer.Repo.ConfigHelper do
   def ssl_options(database_url \\ nil), do: ssl_options(database_url, &System.get_env/1)
 
   @spec ssl_options(database_url :: String.t() | nil, env_function :: (String.t() -> String.t() | nil)) :: Keyword.t()
+  # `verify_none` is intentional for `allow`/`prefer`/`require`: those libpq
+  # sslmodes encrypt the transport without verifying the server certificate.
+  # Certificate verification is enabled by `verify-ca` and `verify-full`.
+  # sobelow_skip ["Config.TLSVerify"]
   def ssl_options(database_url, env_function) do
     case ecto_ssl_mode(database_url, env_function) do
       "disable" ->

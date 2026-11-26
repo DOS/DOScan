@@ -3,9 +3,12 @@ defmodule Explorer.Chain.TransactionTest do
   use Explorer.DataCase
 
   import Mox
+  import Explorer.QuerySources, only: [with_query_sources: 1]
 
   alias Ecto.Changeset
-  alias Explorer.Chain.{Address, InternalTransaction, Transaction}
+  alias Explorer.Chain.{Address, InternalTransaction, MethodIdentifier, SmartContract, Transaction}
+  alias Explorer.Chain.Cache.ContractMethods, as: ContractMethodsCache
+  alias Explorer.Chain.SmartContract.Proxy.Models.Implementation
   alias Explorer.{PagingOptions, TestHelper}
 
   doctest Transaction
@@ -267,6 +270,32 @@ defmodule Explorer.Chain.TransactionTest do
     end
   end
 
+  describe "by_block_number_index_query/1" do
+    test "returns the transactions of the given {block_number, index} pairs once" do
+      block = insert(:block)
+      other_block = insert(:block)
+
+      :transaction |> insert() |> with_block(block, index: 0)
+      second = :transaction |> insert() |> with_block(block, index: 1)
+      third = :transaction |> insert() |> with_block(other_block, index: 0)
+      :transaction |> insert() |> with_block(other_block, index: 1)
+
+      hashes =
+        [{block.number, 1}, {other_block.number, 0}, {block.number, 1}, {other_block.number, 5}]
+        |> Transaction.by_block_number_index_query()
+        |> Repo.all()
+        |> Enum.map(& &1.hash)
+
+      assert Enum.sort(hashes) == Enum.sort([second.hash, third.hash])
+    end
+
+    test "returns no transactions for an empty list" do
+      :transaction |> insert() |> with_block(insert(:block), index: 0)
+
+      assert [] |> Transaction.by_block_number_index_query() |> Repo.all() == []
+    end
+  end
+
   describe "last_nonce_by_address_query/1" do
     test "returns the nonce value from the last block" do
       address = insert(:address)
@@ -392,7 +421,157 @@ defmodule Explorer.Chain.TransactionTest do
     end
   end
 
-  describe "Poison.encode!/1" do
+  describe "decoded_revert_reason/3" do
+    @custom_error_abi %{
+      "inputs" => [%{"name" => "balance", "type" => "uint256"}],
+      "name" => "InsufficientBalance",
+      "type" => "error"
+    }
+
+    setup do
+      encoded_reason = ABI.encode("InsufficientBalance(uint256)", [7])
+
+      insert(:contract_method, identifier: binary_part(encoded_reason, 0, 4), abi: @custom_error_abi, type: "error")
+
+      %{hex_reason: Base.encode16(encoded_reason, case: :lower)}
+    end
+
+    test "decodes a custom error of a contract creation transaction by contract_methods candidates", %{
+      hex_reason: hex_reason
+    } do
+      transaction = insert(:transaction, to_address: nil)
+
+      assert {:error, :contract_not_verified,
+              [{:ok, _, "InsufficientBalance(uint256 balance)", [{"balance", "uint256", 7}]}]} =
+               Transaction.decoded_revert_reason(transaction, hex_reason)
+    end
+
+    test "decodes a custom error of a callee without stored bytecode by contract_methods candidates", %{
+      hex_reason: hex_reason
+    } do
+      transaction =
+        :transaction
+        |> insert(to_address: insert(:address, contract_code: nil))
+        |> Repo.preload(to_address: :smart_contract)
+
+      assert {:error, :contract_not_verified,
+              [{:ok, _, "InsufficientBalance(uint256 balance)", [{"balance", "uint256", 7}]}]} =
+               Transaction.decoded_revert_reason(transaction, hex_reason)
+    end
+
+    test "decodes the default Error(string) reason of a contract creation transaction" do
+      hex_reason = "Error(string)" |> ABI.encode(["out of funds"]) |> Base.encode16(case: :lower)
+      transaction = insert(:transaction, to_address: nil)
+
+      assert {:ok, "08c379a0", "Error(string reason)", [{"reason", "string", "out of funds"}]} =
+               Transaction.decoded_revert_reason(transaction, "0x" <> hex_reason)
+    end
+  end
+
+  describe "decode_transactions/3" do
+    @decoded_set_10 {:ok, "60fe47b1", "set(uint256 x)", [{"x", "uint256", 10}]}
+    @abi_sources ["proxy_implementations", "smart_contracts", "addresses"]
+
+    test "decodes input with the implementation ABI of a proxy whose associations are not preloaded" do
+      transaction =
+        insert_transaction_to_verified_proxy()
+        |> Repo.preload(to_address: :smart_contract)
+
+      assert [@decoded_set_10] = Transaction.decode_transactions([transaction], true, api?: true)
+    end
+
+    test "reuses preloaded proxy implementations and ABIs without querying them again" do
+      transaction =
+        insert_transaction_to_verified_proxy()
+        |> Repo.preload(
+          to_address: [:smart_contract, Implementation.proxy_implementations_smart_contracts_association()]
+        )
+
+      {result, sources} =
+        with_query_sources(fn -> Transaction.decode_transactions([transaction], true, api?: true) end)
+
+      assert [@decoded_set_10] = result
+      assert Enum.filter(sources, &(&1 in @abi_sources)) == []
+    end
+
+    test "skips the proxy implementations query when the association is preloaded and empty" do
+      smart_contract = insert(:smart_contract) |> Repo.preload(:address)
+      input_data = "set(uint)" |> ABI.encode([10]) |> Base.encode16(case: :lower)
+
+      transaction =
+        :transaction
+        |> insert(to_address: smart_contract.address, input: "0x" <> input_data)
+        |> Repo.preload(to_address: [:smart_contract, :proxy_implementations])
+
+      {result, sources} =
+        with_query_sources(fn -> Transaction.decode_transactions([transaction], true, api?: true) end)
+
+      assert [@decoded_set_10] = result
+      assert Enum.filter(sources, &(&1 in @abi_sources)) == []
+    end
+
+    test "fetches the ABI when the smart contract was preloaded without it" do
+      transaction =
+        insert_transaction_to_verified_proxy()
+        |> Repo.preload(to_address: [SmartContract.association_without_abi(), :proxy_implementations])
+
+      {result, sources} =
+        with_query_sources(fn -> Transaction.decode_transactions([transaction], true, api?: true) end)
+
+      assert [@decoded_set_10] = result
+      assert "smart_contracts" in sources
+      refute "proxy_implementations" in sources
+    end
+
+    test "decodes input by contract_methods candidates consistently when the cache is enabled" do
+      config = Application.get_env(:explorer, ContractMethodsCache) || []
+      Application.put_env(:explorer, ContractMethodsCache, Keyword.merge(config, enabled: true))
+
+      contract_method = insert(:contract_method)
+      {:ok, method_id} = MethodIdentifier.cast(contract_method.identifier)
+
+      on_exit(fn ->
+        Application.put_env(:explorer, ContractMethodsCache, config)
+        ConCache.delete(ContractMethodsCache.cache_name(), {:contract_method, method_id})
+      end)
+
+      input_data = "set(uint)" |> ABI.encode([10]) |> Base.encode16(case: :lower)
+
+      transaction =
+        :transaction
+        |> insert(to_address: insert(:address, contract_code: nil), input: "0x" <> input_data)
+        |> Repo.preload(to_address: [:smart_contract, :proxy_implementations])
+
+      # the first call populates the cache, the second one is served from it
+      assert [@decoded_set_10] = Transaction.decode_transactions([transaction], true, api?: true)
+
+      {result, sources} =
+        with_query_sources(fn -> Transaction.decode_transactions([transaction], true, api?: true) end)
+
+      assert [@decoded_set_10] = result
+      refute "contract_methods" in sources
+    end
+  end
+
+  # a verified proxy whose own ABI lacks `set(uint256)`, delegating to a
+  # verified implementation whose ABI has it
+  defp insert_transaction_to_verified_proxy do
+    proxy_smart_contract = :smart_contract |> insert(abi: []) |> Repo.preload(:address)
+    implementation_smart_contract = insert(:smart_contract)
+
+    insert(:proxy_implementation,
+      proxy_address_hash: proxy_smart_contract.address_hash,
+      proxy_type: :eip1967,
+      address_hashes: [implementation_smart_contract.address_hash],
+      names: [implementation_smart_contract.name]
+    )
+
+    input_data = "set(uint)" |> ABI.encode([10]) |> Base.encode16(case: :lower)
+
+    insert(:transaction, to_address: proxy_smart_contract.address, input: "0x" <> input_data)
+  end
+
+  describe "Utils.JSON.encode!/1" do
     test "encodes transaction input" do
       assert %{
                insert(:transaction)
@@ -402,7 +581,7 @@ defmodule Explorer.Chain.TransactionTest do
                        191, 128, 248>>
                  }
              }
-             |> Poison.encode!()
+             |> Utils.JSON.encode!()
     end
   end
 
