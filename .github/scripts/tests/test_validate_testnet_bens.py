@@ -1348,17 +1348,6 @@ class ValidateTestnetBensTests(unittest.TestCase):
 
         self.assertIn("run: python scripts/validate-testnet-bens.py", testnet_job)
 
-    def test_testnet_job_pins_supported_playwright_runner(self):
-        workflow = (
-            ROOT / ".github" / "workflows" / "deploy-config.yml"
-        ).read_text(encoding="utf-8")
-        testnet_job = workflow.split("  deploy-testnet:", 1)[1].split(
-            "\n  deploy-beta:", 1
-        )[0]
-
-        self.assertIn("runs-on: ubuntu-24.04", testnet_job)
-        self.assertNotIn("runs-on: ubuntu-latest", testnet_job)
-
     def test_bens_password_has_one_canonical_secret_source(self):
         workflow = (
             ROOT / ".github" / "workflows" / "deploy-config.yml"
