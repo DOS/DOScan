@@ -19,7 +19,8 @@ defmodule Indexer.Fetcher.Optimism.DisputeGame do
   alias Explorer.{Chain, Helper, Repo}
   alias Explorer.Chain.Data
   alias Explorer.Chain.Hash.Address
-  alias Explorer.Chain.Optimism.{DisputeGame, Withdrawal}
+  alias Explorer.Chain.Optimism.{DisputeGame, SuperchainConfig, Withdrawal}
+  alias Explorer.Chain.SmartContract
   alias Indexer.Fetcher.Optimism
   alias Indexer.Helper, as: IndexerHelper
 
@@ -59,7 +60,7 @@ defmodule Indexer.Fetcher.Optimism.DisputeGame do
     :timer.sleep(2000)
 
     env = Application.get_all_env(:indexer)[Optimism]
-    system_config = env[:optimism_l1_system_config]
+    system_config = SuperchainConfig.optimism_l1_system_config_contract()
     rpc = env[:optimism_l1_rpc]
 
     with {:system_config_valid, true} <- {:system_config_valid, IndexerHelper.address_correct?(system_config)},
@@ -97,7 +98,7 @@ defmodule Indexer.Fetcher.Optimism.DisputeGame do
 
       {:dispute_game_factory_available, false} ->
         Logger.error(
-          "Cannot get DisputeGameFactory contract address from the OptimismPortal contract. Probably, this is the first implementation of OptimismPortal."
+          "Cannot get DisputeGameFactory contract address from the OptimismPortal contract. Probably, this is the first implementation of OptimismPortal. Define the address with INDEXER_OPTIMISM_L1_DISPUTE_GAME_FACTORY_CONTRACT env variable or DisputeGameFactoryProxy in the Superchain config."
         )
 
         {:stop, :normal, %{}}
@@ -126,6 +127,7 @@ defmodule Indexer.Fetcher.Optimism.DisputeGame do
     time_before = Timex.now()
 
     update_respected_game_type(optimism_portal, json_rpc_named_arguments)
+    update_respected_game_type_updated_at(optimism_portal, json_rpc_named_arguments)
 
     chunks_number = ceil((end_index - start_index + 1) / @games_range_size)
     chunk_range = Range.new(0, max(chunks_number - 1, 0), 1)
@@ -212,6 +214,32 @@ defmodule Indexer.Fetcher.Optimism.DisputeGame do
     )
   end
 
+  # Reads the retirement timestamp from the `respectedGameTypeUpdatedAt()` public getter of the OptimismPortal
+  # contract and stores it in the constants table. The proofs submitted at this timestamp or before it are
+  # not accepted by the contract anymore (see `Explorer.Chain.Optimism.Withdrawal.status/3`).
+  #
+  # Unlike the other constants, a failed read doesn't stop the fetcher: the previously stored value (if any)
+  # is kept, and the read is repeated on the next iteration.
+  defp update_respected_game_type_updated_at(optimism_portal, json_rpc_named_arguments) do
+    req = Contract.eth_call_request("0x4fd0434c", optimism_portal, 0, nil, nil)
+    error_message = &"Cannot get respectedGameTypeUpdatedAt() from OptimismPortal contract. Error: #{inspect(&1)}"
+
+    case IndexerHelper.repeated_call(&json_rpc/2, [req, json_rpc_named_arguments], error_message, 1) do
+      {:ok, "0x"} ->
+        # the getter is not supported by the contract
+        Logger.error(error_message.("empty response"))
+
+      {:ok, value} ->
+        Constants.set_constant_value(
+          Withdrawal.respected_game_type_updated_at_constant(),
+          Integer.to_string(quantity_to_integer(value))
+        )
+
+      _ ->
+        :ok
+    end
+  end
+
   defp update_game_statuses(json_rpc_named_arguments) do
     query =
       from(
@@ -259,7 +287,22 @@ defmodule Indexer.Fetcher.Optimism.DisputeGame do
     end
   end
 
+  # Returns the DisputeGameFactory contract address. An explicitly configured address
+  # (INDEXER_OPTIMISM_L1_DISPUTE_GAME_FACTORY_CONTRACT env variable or DisputeGameFactoryProxy
+  # from the Superchain config) takes priority. A zero address is treated as not configured.
+  # Otherwise, the address is read from the disputeGameFactory() public getter of the OptimismPortal contract.
   defp get_dispute_game_factory_address(optimism_portal, json_rpc_named_arguments) do
+    configured_factory = SuperchainConfig.optimism_l1_dispute_game_factory_contract()
+
+    if IndexerHelper.address_correct?(configured_factory) and
+         String.downcase(configured_factory) != SmartContract.burn_address_hash_string() do
+      configured_factory
+    else
+      read_dispute_game_factory_address(optimism_portal, json_rpc_named_arguments)
+    end
+  end
+
+  defp read_dispute_game_factory_address(optimism_portal, json_rpc_named_arguments) do
     req = Contract.eth_call_request("0xf2b4e617", optimism_portal, 0, nil, nil)
 
     error_message =
@@ -280,9 +323,19 @@ defmodule Indexer.Fetcher.Optimism.DisputeGame do
     req = Contract.eth_call_request("0x4d1975b4", dispute_game_factory, 0, nil, nil)
     error_message = &"Cannot fetch game count from the DisputeGameFactory contract. Error: #{inspect(&1)}"
 
-    case IndexerHelper.repeated_call(&json_rpc/2, [req, json_rpc_named_arguments], error_message, retries) do
+    case IndexerHelper.repeated_call(&call_game_count/2, [req, json_rpc_named_arguments], error_message, retries) do
       {:ok, count} -> quantity_to_integer(count)
       _ -> nil
+    end
+  end
+
+  # Calls the gameCount() public getter. An empty response means that the RPC node sees no contract
+  # at the address (or the contract doesn't have the getter). That can be transient (e.g. the node
+  # is not synced yet), so it is returned as an error to be retried like any other failed call.
+  defp call_game_count(req, json_rpc_named_arguments) do
+    case json_rpc(req, json_rpc_named_arguments) do
+      {:ok, "0x"} -> {:error, "empty response"}
+      result -> result
     end
   end
 

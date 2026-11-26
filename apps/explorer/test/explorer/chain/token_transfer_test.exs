@@ -7,8 +7,9 @@ defmodule Explorer.Chain.TokenTransferTest do
 
   import Explorer.Factory
 
-  alias Explorer.PagingOptions
   alias Explorer.Chain.TokenTransfer
+  alias Explorer.PagingOptions
+  alias Explorer.Utility.LogFirstTopic
 
   doctest Explorer.Chain.TokenTransfer
 
@@ -330,7 +331,7 @@ defmodule Explorer.Chain.TokenTransferTest do
     end
   end
 
-  describe "uncataloged_token_transfer_block_numbers/0" do
+  describe "uncataloged_token_transfer_block_numbers/2" do
     test "returns a list of block numbers" do
       block = insert(:block)
       address = insert(:address)
@@ -351,7 +352,83 @@ defmodule Explorer.Chain.TokenTransferTest do
         )
 
       block_number = log.block_number
-      assert {:ok, [^block_number]} = TokenTransfer.uncataloged_token_transfer_block_numbers()
+      assert [^block_number] = TokenTransfer.uncataloged_token_transfer_block_numbers(block_number, block_number)
+    end
+
+    test "does not return block numbers outside the given range" do
+      block = insert(:block)
+      address = insert(:address)
+
+      log =
+        insert(:token_transfer_log,
+          transaction:
+            insert(:transaction,
+              block_number: block.number,
+              block_hash: block.hash,
+              cumulative_gas_used: 0,
+              gas_used: 0,
+              index: 0
+            ),
+          block: block,
+          address_hash: address.hash,
+          address: address
+        )
+
+      block_number = log.block_number
+      assert [] = TokenTransfer.uncataloged_token_transfer_block_numbers(block_number + 1, block_number + 100)
+      assert [] = TokenTransfer.uncataloged_token_transfer_block_numbers(max(block_number - 100, 0), block_number - 1)
+    end
+
+    test "matches Arc native token logs whether the address is kept in `address_id` or in `address_hash`" do
+      # both formats are present while the optimized fields migration is in progress
+      set_fill_logs_optimized_fields_migration_started()
+
+      arc_native_token = insert(:address)
+      arc_native_token_system = insert(:address)
+      token = insert(:address)
+
+      initial_arc_env = Application.get_env(:indexer, :arc)
+
+      Application.put_env(
+        :indexer,
+        :arc,
+        Keyword.merge(initial_arc_env || [],
+          arc_native_token_address: to_string(arc_native_token.hash),
+          arc_native_token_system_address: to_string(arc_native_token_system.hash)
+        )
+      )
+
+      on_exit(fn -> Application.put_env(:indexer, :arc, initial_arc_env) end)
+
+      transfer_event = TokenTransfer.constant()
+      native_coin_transferred_event = TokenTransfer.arc_native_coin_transferred_event()
+
+      uncataloged_logs = [
+        insert_optimized_log(token, transfer_event),
+        insert_optimized_log(arc_native_token_system, native_coin_transferred_event),
+        insert_legacy_address_log(token, transfer_event),
+        insert_legacy_address_log(arc_native_token_system, native_coin_transferred_event)
+      ]
+
+      # ERC-20 `Transfer` events of the native token are ignored on Arc
+      ignored_logs = [
+        insert_optimized_log(arc_native_token, transfer_event),
+        insert_legacy_address_log(arc_native_token, transfer_event)
+      ]
+
+      block_numbers = Enum.map(uncataloged_logs ++ ignored_logs, & &1.block_number)
+
+      initial_chain_type = Application.get_env(:explorer, :chain_type)
+      Application.put_env(:explorer, :chain_type, :arc)
+
+      uncataloged_block_numbers =
+        try do
+          TokenTransfer.uncataloged_token_transfer_block_numbers(Enum.min(block_numbers), Enum.max(block_numbers))
+        after
+          Application.put_env(:explorer, :chain_type, initial_chain_type)
+        end
+
+      assert uncataloged_logs |> Enum.map(& &1.block_number) |> Enum.sort() == Enum.sort(uncataloged_block_numbers)
     end
   end
 
@@ -364,7 +441,7 @@ defmodule Explorer.Chain.TokenTransferTest do
         )
 
       block_number = log.block_number
-      assert {:ok, [^block_number]} = TokenTransfer.uncataloged_token_transfer_block_numbers()
+      assert [^block_number] = TokenTransfer.uncataloged_token_transfer_block_numbers(block_number, block_number)
     end
 
     test "does not return block numbers when matching token transfer exists for Celo epoch blocks" do
@@ -398,7 +475,7 @@ defmodule Explorer.Chain.TokenTransferTest do
         to_address: to_address
       )
 
-      assert {:ok, []} = TokenTransfer.uncataloged_token_transfer_block_numbers()
+      assert [] = TokenTransfer.uncataloged_token_transfer_block_numbers(log.block_number, log.block_number)
     end
   end
 
@@ -409,7 +486,7 @@ defmodule Explorer.Chain.TokenTransferTest do
 
       transaction = insert(:transaction) |> with_block()
 
-      erc7984_transfer =
+      _erc7984_transfer =
         insert(
           :token_transfer,
           token_type: "ERC-7984",
@@ -437,5 +514,22 @@ defmodule Explorer.Chain.TokenTransferTest do
       assert hd(transfers).amount == nil
       assert hd(transfers).token_ids == nil
     end
+  end
+
+  # Inserts a log in the format used since v12: `address_hash` and `first_topic`
+  # are kept only in `address_id` and `first_topic_id`.
+  defp insert_optimized_log(address, first_topic) do
+    insert(:log,
+      address: address,
+      address_hash: nil,
+      first_topic: nil,
+      first_topic_id: LogFirstTopic.find_or_create(first_topic).id
+    )
+  end
+
+  # Inserts a log not processed by the `fill_logs_optimized_fields` migration
+  # yet: its address is kept only in `address_hash`.
+  defp insert_legacy_address_log(address, first_topic) do
+    insert(:log, address: address, address_mapping: nil, first_topic: first_topic)
   end
 end

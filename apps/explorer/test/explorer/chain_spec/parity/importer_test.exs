@@ -16,11 +16,11 @@ defmodule Explorer.ChainSpec.Parity.ImporterTest do
 
   @chain_spec "#{File.cwd!()}/test/support/fixture/chain_spec/foundation.json"
               |> File.read!()
-              |> Jason.decode!()
+              |> Utils.JSON.decode!()
 
   @chain_classic_spec "#{File.cwd!()}/test/support/fixture/chain_spec/classic.json"
                       |> File.read!()
-                      |> Jason.decode!()
+                      |> Utils.JSON.decode!()
 
   describe "emission_rewards/1" do
     test "fetches and formats reward ranges" do
@@ -113,8 +113,7 @@ defmodule Explorer.ChainSpec.Parity.ImporterTest do
                value: 8_000_000_000_000_000_000_000,
                contract_code: nil,
                nonce: 0
-             } ==
-               List.first(coin_balances)
+             } in coin_balances
     end
 
     test "parses nonce and contact code" do

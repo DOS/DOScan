@@ -62,7 +62,7 @@ defmodule BlockScoutWeb.API.RPC.ContractControllerTest do
 
   def result(contract) do
     %{
-      "ABI" => Jason.encode!(contract.abi),
+      "ABI" => Utils.JSON.encode!(contract.abi),
       "Address" => to_string(contract.address_hash),
       "CompilerVersion" => contract.compiler_version,
       "ContractName" => contract.name,
@@ -370,7 +370,7 @@ defmodule BlockScoutWeb.API.RPC.ContractControllerTest do
                |> get("/api", params)
                |> json_response(200)
 
-      assert response["result"] == Jason.encode!(contract.abi)
+      assert response["result"] == Utils.JSON.encode!(contract.abi)
       assert response["status"] == "1"
       assert response["message"] == "OK"
       assert :ok = ExJsonSchema.Validator.validate(getabi_schema(), response)
@@ -458,7 +458,7 @@ defmodule BlockScoutWeb.API.RPC.ContractControllerTest do
         %{
           "Address" => to_string(contract.address_hash),
           "SourceCode" => contract.contract_source_code,
-          "ABI" => Jason.encode!(contract.abi),
+          "ABI" => Utils.JSON.encode!(contract.abi),
           "ContractName" => contract.name,
           "CompilerVersion" => contract.compiler_version,
           # The contract's optimization value is true, so the expected value
@@ -491,12 +491,73 @@ defmodule BlockScoutWeb.API.RPC.ContractControllerTest do
       assert :ok = ExJsonSchema.Validator.validate(getsourcecode_schema(), response)
     end
 
+    test "with an unverified proxy of a verified implementation", %{conn: conn} do
+      implementation_contract = insert(:smart_contract, name: "Implementation")
+      implementation_address_hash_string = to_string(implementation_contract.address_hash)
+      "0x" <> implementation_address_hash_hex = implementation_address_hash_string
+
+      proxy_address =
+        insert(:address,
+          contract_code: "0x363d3d373d3d3d363d73" <> implementation_address_hash_hex <> "5af43d82803e903d91602b57fd5bf3"
+        )
+
+      params = %{
+        "module" => "contract",
+        "action" => "getsourcecode",
+        "address" => to_string(proxy_address.hash)
+      }
+
+      assert response =
+               conn
+               |> get("/api", params)
+               |> json_response(200)
+
+      assert response["status"] == "1"
+      assert [result] = response["result"]
+
+      # sources of the implementation are returned for convenience,
+      # but the answer states that they belong to the implementation of a proxy
+      assert result["Address"] == to_string(proxy_address.hash)
+      assert result["SourceCode"] == implementation_contract.contract_source_code
+      assert result["ContractName"] == "Implementation"
+      assert result["IsProxy"] == "true"
+      assert result["ImplementationAddress"] == implementation_address_hash_string
+      assert result["ImplementationAddresses"] == [implementation_address_hash_string]
+      assert :ok = ExJsonSchema.Validator.validate(getsourcecode_schema(), response)
+    end
+
+    test "with an unverified non-proxy bytecode twin of a verified contract", %{conn: conn} do
+      contract = insert(:smart_contract)
+      verified_address = Repo.get!(Address, contract.address_hash)
+      twin_address = insert(:address, contract_code: verified_address.contract_code)
+
+      params = %{
+        "module" => "contract",
+        "action" => "getsourcecode",
+        "address" => to_string(twin_address.hash)
+      }
+
+      EthereumJSONRPC.Mox
+      |> TestHelper.mock_generic_proxy_requests()
+
+      assert response =
+               conn
+               |> get("/api", params)
+               |> json_response(200)
+
+      assert [result] = response["result"]
+      assert result["Address"] == to_string(twin_address.hash)
+      assert result["SourceCode"] == contract.contract_source_code
+      assert result["IsProxy"] == "false"
+      refute Map.has_key?(result, "ImplementationAddress")
+    end
+
     test "with a verified proxy contract address", %{conn: conn} do
       implementation_contract =
         insert(:smart_contract,
           name: "Implementation",
           external_libraries: [],
-          constructor_arguments: "",
+          constructor_arguments: nil,
           abi: [
             %{
               "type" => "constructor",
@@ -681,7 +742,7 @@ defmodule BlockScoutWeb.API.RPC.ContractControllerTest do
         %{
           "Address" => to_string(proxy_contract.address_hash),
           "SourceCode" => proxy_contract.contract_source_code,
-          "ABI" => Jason.encode!(proxy_contract.abi),
+          "ABI" => Utils.JSON.encode!(proxy_contract.abi),
           "ContractName" => proxy_contract.name,
           "CompilerVersion" => proxy_contract.compiler_version,
           "FileName" => "",
@@ -711,7 +772,7 @@ defmodule BlockScoutWeb.API.RPC.ContractControllerTest do
           optimization_runs: @optimization_runs,
           evm_version: "default",
           constructor_arguments:
-            "00000000000000000000000008e7592ce0d7ebabf42844b62ee6a878d4e1913e000000000000000000000000e1b6037da5f1d756499e184ca15254a981c92546",
+            "0x00000000000000000000000008e7592ce0d7ebabf42844b62ee6a878d4e1913e000000000000000000000000e1b6037da5f1d756499e184ca15254a981c92546",
           contract_code_md5: "123"
         )
 
@@ -725,14 +786,14 @@ defmodule BlockScoutWeb.API.RPC.ContractControllerTest do
         %{
           "Address" => to_string(contract.address_hash),
           "SourceCode" => contract.contract_source_code,
-          "ABI" => Jason.encode!(contract.abi),
+          "ABI" => Utils.JSON.encode!(contract.abi),
           "ContractName" => contract.name,
           "CompilerVersion" => contract.compiler_version,
           "OptimizationUsed" => "true",
           "OptimizationRuns" => @optimization_runs,
           "EVMVersion" => "default",
           "ConstructorArguments" =>
-            "00000000000000000000000008e7592ce0d7ebabf42844b62ee6a878d4e1913e000000000000000000000000e1b6037da5f1d756499e184ca15254a981c92546",
+            "0x00000000000000000000000008e7592ce0d7ebabf42844b62ee6a878d4e1913e000000000000000000000000e1b6037da5f1d756499e184ca15254a981c92546",
           "FileName" => "",
           "IsProxy" => "false"
         }
@@ -831,7 +892,7 @@ defmodule BlockScoutWeb.API.RPC.ContractControllerTest do
         %{
           "Address" => to_string(contract.address_hash),
           "SourceCode" => contract.contract_source_code,
-          "ABI" => Jason.encode!(contract.abi),
+          "ABI" => Utils.JSON.encode!(contract.abi),
           "ContractName" => contract.name,
           "CompilerVersion" => contract.compiler_version,
           "OptimizationUsed" => "true",
@@ -955,7 +1016,7 @@ defmodule BlockScoutWeb.API.RPC.ContractControllerTest do
   #     "SourceCode" =>
   #       "/**\n* Submitted for verification at blockscout.com on #{verified_contract.inserted_at}\n*/\n" <>
   #         contract_code_info.source_code,
-  #     "ABI" => Jason.encode!(contract_code_info.abi),
+  #     "ABI" => Utils.JSON.encode!(contract_code_info.abi),
   #     "ContractName" => contract_code_info.name,
   #     "CompilerVersion" => contract_code_info.version,
   #     "OptimizationUsed" => "false",
@@ -973,7 +1034,7 @@ defmodule BlockScoutWeb.API.RPC.ContractControllerTest do
   #   contract_data =
   #     "#{File.cwd!()}/test/support/fixture/smart_contract/contract_with_lib.json"
   #     |> File.read!()
-  #     |> Jason.decode!()
+  #     |> Utils.JSON.decode!()
   #     |> List.first()
   #
   #   %{

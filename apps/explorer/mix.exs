@@ -21,8 +21,14 @@ defmodule Explorer.Mixfile do
       lockfile: "../../mix.lock",
       package: package(),
       start_permanent: Mix.env() == :prod,
-      version: "11.2.8",
-      xref: [exclude: [BlockScoutWeb.Routers.WebRouter.Helpers, Indexer.Helper, Indexer.Fetcher.InternalTransaction]]
+      version: "12.1.0",
+      elixirc_options: [
+        no_warn_undefined: [
+          BlockScoutWeb.Routers.WebRouter.Helpers,
+          Indexer.Helper,
+          Indexer.Fetcher.InternalTransaction
+        ]
+      ]
     ]
   end
 
@@ -83,18 +89,18 @@ defmodule Explorer.Mixfile do
       {:ex_machina, "~> 2.3", only: [:test]},
       # ZSTD compression/decompression
       {:ezstd, "~> 1.2"},
-      {:exvcr, "~> 0.10", only: :test},
-      {:httpoison, "~> 2.0"},
-      {:jason, "~> 1.3"},
+      {:httpoison, "~> 3.0"},
       {:junit_formatter, ">= 0.0.0", only: [:test], runtime: false},
       {:libcluster, "~> 3.5"},
       # Log errors and application output to separate files
-      {:logger_file_backend, "~> 0.0.10"},
+      {:logger_file_backend, "~> 0.1.1"},
       {:logger_json, "~> 7.0"},
       {:math, "~> 0.7.0"},
+      # `mock` pins `meck ~> 0.9.2`, which fails to compile on OTP 29 (bare `catch`
+      # deprecation + `warnings_as_errors`). meck 1.x keeps the same API.
+      {:meck, "~> 1.2", override: true, only: [:test], runtime: false},
       {:mock, "~> 0.3.0", only: [:test], runtime: false},
-      {:mox, "~> 1.3.1"},
-      {:poison, "~> 5.0.0"},
+      {:mox, "~> 1.3.2"},
       {:nimble_csv, "~> 1.1"},
       {:postgrex, ">= 0.0.0"},
       {:prometheus, "~> 6.0", override: true},
@@ -114,9 +120,11 @@ defmodule Explorer.Mixfile do
       # Attach `:prometheus_ecto` to `:ecto`
       {:telemetry, "~> 1.4.1"},
       # `Timex.Duration` for `Explorer.Chain.Cache.Counters.AverageBlockTime.average_block_time/0`
-      {:timex, "~> 3.7.1"},
+      {:timex, "~> 4.0.0"},
+      # Validation of the Superchain config file content
+      {:toml, "~> 0.7"},
       {:con_cache, "~> 1.0"},
-      {:tesla, "~> 1.21.0"},
+      {:tesla, "~> 1.22.0"},
       {:cbor, "~> 1.0"},
       {:cloak_ecto, "~> 1.3.0"},
       {:redix, "~> 1.1"},
@@ -130,16 +138,15 @@ defmodule Explorer.Mixfile do
       {:oauth2, "~> 2.0"},
       {:siwe, github: "royal-markets/siwe-ex", ref: "51c9c08240eb7eea3c35693011f8d260cd9bb3be"},
       {:joken, "~> 2.6"},
-      {:joken_jwks, "~> 1.7.0"},
+      {:joken_jwks, "~> 1.8"},
       {:utils, in_umbrella: true},
-      {:dns, "~> 2.4.0"},
-      {:inet_cidr, "~> 1.0.0"},
       {:hammer, "~> 7.0"},
       {:ton, "~> 0.5.0"},
       {:mint, "~> 1.0"},
       # pooled HTTP client on top of mint, used for microservice requests
       {:finch, "~> 0.18"},
-      {:oban, "~> 2.19"}
+      {:oban, "~> 2.19"},
+      {:nimble_lz4, "~> 1.1"}
     ]
   end
 

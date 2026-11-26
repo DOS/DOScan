@@ -18,7 +18,10 @@ defmodule Explorer.Chain.Metrics.Queries.IndexerMetrics do
   alias Explorer.Repo
 
   @doc """
-  Query to get the number of missing block numbers in the DB
+  Query to get the number of missing block numbers in the DB.
+
+  On the Filecoin chain type, heights recorded in `null_round_heights` are not counted:
+  a null round has no block by design, so it can never be indexed.
   """
   # sobelow_skip ["SQL"]
   @spec missing_blocks_count() :: integer()
@@ -28,6 +31,8 @@ defmodule Explorer.Chain.Metrics.Queries.IndexerMetrics do
     if block_ranges == [] do
       0
     else
+      missing_condition = missing_block_condition()
+
       {sql_parts, params} =
         Enum.reduce(block_ranges, {[], []}, fn
           first..last//_, {parts, acc_params} ->
@@ -39,9 +44,7 @@ defmodule Explorer.Chain.Metrics.Queries.IndexerMetrics do
             part = """
             SELECT COUNT(*) AS missing_count
             FROM generate_series($#{param_index_from}::bigint, $#{param_index_to}::bigint) AS num(number)
-            WHERE NOT EXISTS (
-              SELECT 1 FROM blocks b WHERE b.number = num.number AND b.consensus
-            )
+            WHERE #{missing_condition}
             """
 
             {[part | parts], [to, from | acc_params]}
@@ -55,9 +58,7 @@ defmodule Explorer.Chain.Metrics.Queries.IndexerMetrics do
               $#{param_index}::bigint,
               (SELECT COALESCE(MAX(number), $#{param_index}) FROM blocks)::bigint
             ) AS num(number)
-            WHERE NOT EXISTS (
-              SELECT 1 FROM blocks b WHERE b.number = num.number AND b.consensus
-            )
+            WHERE #{missing_condition}
             """
 
             {[part | parts], [start_from | acc_params]}
@@ -76,6 +77,27 @@ defmodule Explorer.Chain.Metrics.Queries.IndexerMetrics do
         _ ->
           0
       end
+    end
+  end
+
+  # SQL predicate over `num.number` from `generate_series` telling whether the number is
+  # a missing block. On Filecoin, heights recorded as null rounds are excluded as well.
+  defp missing_block_condition do
+    base = """
+    NOT EXISTS (
+      SELECT 1 FROM blocks b WHERE b.number = num.number AND b.consensus
+    )
+    """
+
+    if Application.get_env(:explorer, :chain_type) == :filecoin do
+      base <>
+        """
+        AND NOT EXISTS (
+          SELECT 1 FROM null_round_heights nrh WHERE nrh.height = num.number
+        )
+        """
+    else
+      base
     end
   end
 
@@ -165,14 +187,17 @@ defmodule Explorer.Chain.Metrics.Queries.IndexerMetrics do
   defp maybe_filter_by_trace_first_block(query, _trace_first_block), do: query
 
   @doc """
-  Query to get the count of current token balances with missing values
+  Query to get the count of current token balances with missing values.
+
+  Returns 0 if the current token balances fetcher is disabled, because the
+  indexer does not fetch these values then.
   """
   # sobelow_skip ["SQL"]
   @spec missing_current_token_balances_count() :: integer()
   def missing_current_token_balances_count do
     block_ranges = RangesHelper.get_block_ranges()
 
-    if block_ranges == [] do
+    if current_token_balances_fetcher_disabled?() or block_ranges == [] do
       0
     else
       {range_conditions, params} =
@@ -222,6 +247,12 @@ defmodule Explorer.Chain.Metrics.Queries.IndexerMetrics do
           0
       end
     end
+  end
+
+  defp current_token_balances_fetcher_disabled? do
+    :indexer
+    |> Application.get_env(Indexer.Fetcher.TokenBalance.Current.Supervisor, [])
+    |> Keyword.get(:disabled?) == true
   end
 
   @doc """
@@ -282,7 +313,12 @@ defmodule Explorer.Chain.Metrics.Queries.IndexerMetrics do
   end
 
   @doc """
-  Query to get the count of archival token balances with missing values
+  Query to get the count of archival token balances with missing values.
+
+  Counts the token balances that `Explorer.Chain.Address.TokenBalance.unfetched_token_balances/0`
+  selects for the archival fetcher, regardless of `refetch_after`. The condition repeats the
+  predicate of the partial index `unfetched_address_token_balances_v3_index` literally,
+  so the count reads that index instead of the whole `address_token_balances` table.
   """
   @spec missing_archival_token_balances_count() :: integer()
   def missing_archival_token_balances_count do
@@ -292,8 +328,11 @@ defmodule Explorer.Chain.Metrics.Queries.IndexerMetrics do
       query =
         from(
           token_balance in TokenBalance,
-          where: is_nil(token_balance.value_fetched_at),
-          where: token_balance.token_type != "ERC-7984"
+          where:
+            (fragment("? != '\\x0000000000000000000000000000000000000000'", token_balance.address_hash) and
+               token_balance.token_type == "ERC-721") or
+              token_balance.token_type in ["ERC-20", "ERC-8056", "ZRC-2", "ERC-1155", "ERC-404"],
+          where: is_nil(token_balance.value_fetched_at) or is_nil(token_balance.value)
         )
 
       query

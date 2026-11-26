@@ -5,9 +5,9 @@ defmodule BlockScoutWeb.API.V2.OptimismControllerTest do
 
   import Mox
 
-  alias Explorer.Chain.{Address, Data}
-  alias Explorer.Chain.Optimism.Deposit
-  alias Explorer.TestHelper
+  alias Explorer.Chain.{Address, Data}, warn: false
+  alias Explorer.Chain.Optimism.Deposit, warn: false
+  alias Explorer.TestHelper, warn: false
 
   setup :set_mox_global
 
@@ -23,6 +23,27 @@ defmodule BlockScoutWeb.API.V2.OptimismControllerTest do
         assert response_2nd_page = json_response(request_2nd_page, 200)
 
         check_paginated_response(response, response_2nd_page, deposits)
+      end
+    end
+  end
+
+  describe "/optimism/deposits/count" do
+    if @chain_type == :optimism do
+      test "returns cached deposits count", %{conn: conn} do
+        insert_list(5, :op_deposit)
+
+        Explorer.Chain.Cache.Counters.Optimism.DepositsCount.consolidate()
+
+        request = get(conn, "/api/v2/optimism/deposits/count")
+        assert json_response(request, 200) == 5
+      end
+
+      test "returns an integer estimate when the cache is cold", %{conn: conn} do
+        insert_list(2, :op_deposit)
+
+        request = get(conn, "/api/v2/optimism/deposits/count")
+        assert count = json_response(request, 200)
+        assert is_integer(count)
       end
     end
   end
@@ -57,23 +78,25 @@ defmodule BlockScoutWeb.API.V2.OptimismControllerTest do
     end
   end
 
-  defp check_paginated_response(first_page_resp, second_page_resp, items) do
-    assert Enum.count(first_page_resp["items"]) == 50
-    assert first_page_resp["next_page_params"] != nil
-    compare_item(Enum.at(items, 50), Enum.at(first_page_resp["items"], 0))
-    compare_item(Enum.at(items, 1), Enum.at(first_page_resp["items"], 49))
+  if @chain_type == :optimism do
+    defp check_paginated_response(first_page_resp, second_page_resp, items) do
+      assert Enum.count(first_page_resp["items"]) == 50
+      assert first_page_resp["next_page_params"] != nil
+      compare_item(Enum.at(items, 50), Enum.at(first_page_resp["items"], 0))
+      compare_item(Enum.at(items, 1), Enum.at(first_page_resp["items"], 49))
 
-    assert Enum.count(second_page_resp["items"]) == 1
-    assert second_page_resp["next_page_params"] == nil
-    compare_item(Enum.at(items, 0), Enum.at(second_page_resp["items"], 0))
-  end
+      assert Enum.count(second_page_resp["items"]) == 1
+      assert second_page_resp["next_page_params"] == nil
+      compare_item(Enum.at(items, 0), Enum.at(second_page_resp["items"], 0))
+    end
 
-  defp compare_item(%Deposit{} = deposit, json) do
-    assert deposit.l1_block_number == json["l1_block_number"]
-    assert DateTime.to_iso8601(deposit.l1_block_timestamp) == json["l1_block_timestamp"]
-    assert to_string(deposit.l1_transaction_hash) == json["l1_transaction_hash"]
-    assert Address.checksum(deposit.l1_transaction_origin) == Address.checksum(json["l1_transaction_origin"])
-    assert to_string(deposit.l2_transaction.hash) == json["l2_transaction_hash"]
-    assert to_string(deposit.l2_transaction.gas) == json["l2_transaction_gas_limit"]
+    defp compare_item(%Deposit{} = deposit, json) do
+      assert deposit.l1_block_number == json["l1_block_number"]
+      assert DateTime.to_iso8601(deposit.l1_block_timestamp) == json["l1_block_timestamp"]
+      assert to_string(deposit.l1_transaction_hash) == json["l1_transaction_hash"]
+      assert Address.checksum(deposit.l1_transaction_origin) == Address.checksum(json["l1_transaction_origin"])
+      assert to_string(deposit.l2_transaction.hash) == json["l2_transaction_hash"]
+      assert to_string(deposit.l2_transaction.gas) == json["l2_transaction_gas_limit"]
+    end
   end
 end

@@ -10,8 +10,10 @@ defmodule Explorer.Chain.Optimism.Withdrawal do
   alias Explorer.Chain
   alias Explorer.Chain.{Block, Hash, Log, Transaction}
   alias Explorer.Chain.Cache.OptimismFinalizationPeriod
-  alias Explorer.Chain.Optimism.{DisputeGame, OutputRoot, WithdrawalEvent}
+  alias Explorer.Chain.Optimism.{DisputeGame, OutputRoot, SuperchainConfig, WithdrawalEvent}
   alias Explorer.{Helper, PagingOptions, Repo}
+  alias Explorer.Repo.LockTimeout
+  alias Explorer.Utility.{LogFirstTopic, LogHelper}
 
   @game_status_defender_wins 2
 
@@ -25,6 +27,7 @@ defmodule Explorer.Chain.Optimism.Withdrawal do
 
   @dispute_game_finality_delay_seconds "optimism_dispute_game_finality_delay_seconds"
   @proof_maturity_delay_seconds "optimism_proof_maturity_delay_seconds"
+  @respected_game_type_updated_at "optimism_respected_game_type_updated_at"
 
   # 32-byte signature of the event MessagePassed(uint256 indexed nonce, address indexed sender, address indexed target, uint256 value, uint256 gasLimit, bytes data, bytes32 withdrawalHash)
   @message_passed_event "0x02a52367d10742d8032712c1bb8e0144ff1ec5ffda1ed7d70bb05a2744955054"
@@ -69,37 +72,31 @@ defmodule Explorer.Chain.Optimism.Withdrawal do
         []
 
       _ ->
-        base_query =
-          from(w in __MODULE__,
-            order_by: [desc: w.msg_nonce],
-            left_join: l2_transaction in Transaction,
-            on: w.l2_transaction_hash == l2_transaction.hash,
-            left_join: l2_block in Block,
-            on: w.l2_block_number == l2_block.number,
-            left_join: we in WithdrawalEvent,
-            on: we.withdrawal_hash == w.hash and we.l1_event_type == :WithdrawalFinalized,
-            left_join: log in Log,
-            on:
-              log.transaction_hash == w.l2_transaction_hash and log.first_topic == ^@message_passed_event and
-                log.second_topic == fragment("numeric_to_bytea32(msg_nonce)"),
-            select: %{
-              msg_nonce: w.msg_nonce,
-              hash: w.hash,
-              l2_block_number: w.l2_block_number,
-              l2_timestamp: l2_block.timestamp,
-              l2_transaction_hash: w.l2_transaction_hash,
-              l1_transaction_hash: we.l1_transaction_hash,
-              from: l2_transaction.from_address_hash,
-              msg_log_sender_address_hash: log.third_topic,
-              msg_log_target_address_hash: log.fourth_topic,
-              msg_log_data: log.data
-            }
-          )
-
-        base_query
+        __MODULE__
+        |> order_by([w], desc: w.msg_nonce)
+        |> join(:left, [w], l2_transaction in Transaction, on: w.l2_transaction_hash == l2_transaction.hash)
+        |> join(:left, [w], l2_block in Block, on: w.l2_block_number == l2_block.number and l2_block.consensus == true)
+        |> join(:left, [w], we in WithdrawalEvent,
+          on: we.withdrawal_hash == w.hash and we.l1_event_type == :WithdrawalFinalized
+        )
+        |> join_message_passed_log()
+        |> select([w, l2_transaction, l2_block, we, log], %{
+          msg_nonce: w.msg_nonce,
+          hash: w.hash,
+          l2_block_number: w.l2_block_number,
+          l2_timestamp: l2_block.timestamp,
+          l2_transaction_hash: w.l2_transaction_hash,
+          l1_transaction_hash: we.l1_transaction_hash,
+          from: l2_transaction.from_address_hash,
+          msg_log_sender_address_hash: log.third_topic,
+          msg_log_target_address_hash: log.fourth_topic,
+          msg_log_data: log.data,
+          msg_log_compressed_data: log.compressed_data
+        })
         |> page_optimism_withdrawals(paging_options)
         |> limit(^paging_options.page_size)
         |> select_repo(options).all(timeout: :infinity)
+        |> Enum.map(&prepare_msg_log_data/1)
     end
   end
 
@@ -156,39 +153,101 @@ defmodule Explorer.Chain.Optimism.Withdrawal do
   @spec transaction_statuses(Hash.t()) :: [{non_neg_integer(), String.t(), map()}]
   def transaction_statuses(l2_transaction_hash) do
     query =
-      from(w in __MODULE__,
-        where: w.l2_transaction_hash == ^l2_transaction_hash,
-        left_join: l2_block in Block,
-        on: w.l2_block_number == l2_block.number and l2_block.consensus == true,
-        left_join: we in WithdrawalEvent,
-        on: we.withdrawal_hash == w.hash and we.l1_event_type == :WithdrawalFinalized,
-        left_join: log in Log,
-        on:
-          log.transaction_hash == w.l2_transaction_hash and log.first_topic == ^@message_passed_event and
-            log.second_topic == fragment("numeric_to_bytea32(msg_nonce)"),
-        select: %{
-          hash: w.hash,
-          l2_block_number: w.l2_block_number,
-          l1_transaction_hash: we.l1_transaction_hash,
-          msg_nonce: w.msg_nonce,
-          msg_log_sender_address_hash: log.third_topic,
-          msg_log_target_address_hash: log.fourth_topic,
-          msg_log_data: log.data
-        }
+      __MODULE__
+      |> where([w], w.l2_transaction_hash == ^l2_transaction_hash)
+      |> join(:left, [w], l2_transaction in Transaction, on: w.l2_transaction_hash == l2_transaction.hash)
+      |> join(:left, [w], l2_block in Block, on: w.l2_block_number == l2_block.number and l2_block.consensus == true)
+      |> join(:left, [w], we in WithdrawalEvent,
+        on: we.withdrawal_hash == w.hash and we.l1_event_type == :WithdrawalFinalized
       )
+      |> join_message_passed_log()
+      |> select([w, _l2_transaction, l2_block, we, log], %{
+        hash: w.hash,
+        l2_block_number: w.l2_block_number,
+        l2_timestamp: l2_block.timestamp,
+        l1_transaction_hash: we.l1_transaction_hash,
+        msg_nonce: w.msg_nonce,
+        msg_log_sender_address_hash: log.third_topic,
+        msg_log_target_address_hash: log.fourth_topic,
+        msg_log_data: log.data,
+        msg_log_compressed_data: log.compressed_data
+      })
 
-    query
-    |> Repo.replica().all(timeout: :infinity)
-    |> Enum.map(fn w ->
-      msg_nonce =
-        Bitwise.band(
-          Decimal.to_integer(w.msg_nonce),
-          0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF
+    # The withdrawals are optional data of the transaction page, which must not
+    # hang while the joined `logs` table is locked exclusively (e.g. by
+    # `VACUUM FULL`): the query fails fast and no withdrawals are shown instead.
+    case LockTimeout.run(Repo.replica(), fn repo -> repo.all(query) end, timeout: :infinity) do
+      {:ok, withdrawals} ->
+        Enum.map(withdrawals, fn w ->
+          w = prepare_msg_log_data(w)
+
+          msg_nonce =
+            Bitwise.band(
+              Decimal.to_integer(w.msg_nonce),
+              0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF
+            )
+
+          {status, _} = status(w, nil, @api_true)
+          {msg_nonce, status, w}
+        end)
+
+      {:error, :lock_timeout} ->
+        []
+    end
+  end
+
+  @spec prepare_msg_log_data(map()) :: map()
+  defp prepare_msg_log_data(%{msg_log_compressed_data: compressed_data} = w) do
+    w
+    |> Map.delete(:msg_log_compressed_data)
+    |> Map.put(:msg_log_data, w.msg_log_data || compressed_data)
+  end
+
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
+  defp join_message_passed_log(query) do
+    first_topic_id = LogFirstTopic.value_to_id(@message_passed_event)
+    migration_finished? = LogHelper.fill_optimized_fields_migration_finished?()
+    migration_started? = LogHelper.fill_optimized_fields_migration_started?()
+
+    cond do
+      migration_finished? and is_nil(first_topic_id) ->
+        join(query, :left, [w, l2_transaction], log in Log, on: false)
+
+      migration_finished? ->
+        join(query, :left, [w, l2_transaction], log in Log,
+          on:
+            log.block_number == w.l2_block_number and log.transaction_index == l2_transaction.index and
+              log.first_topic_id == ^first_topic_id and
+              log.second_topic == fragment("bytea_ltrim_zeroes(numeric_to_bytea32(msg_nonce))")
         )
 
-      {status, _} = status(w, nil, @api_true)
-      {msg_nonce, status, w}
-    end)
+      migration_started? and is_nil(first_topic_id) ->
+        join(query, :left, [w, l2_transaction], log in Log,
+          on:
+            (log.transaction_hash == w.l2_transaction_hash or
+               (log.block_number == w.l2_block_number and log.transaction_index == l2_transaction.index)) and
+              log.first_topic == ^@message_passed_event and
+              (log.second_topic == fragment("numeric_to_bytea32(msg_nonce)") or
+                 log.second_topic == fragment("bytea_ltrim_zeroes(numeric_to_bytea32(msg_nonce))"))
+        )
+
+      migration_started? ->
+        join(query, :left, [w, l2_transaction], log in Log,
+          on:
+            (log.transaction_hash == w.l2_transaction_hash or
+               (log.block_number == w.l2_block_number and log.transaction_index == l2_transaction.index)) and
+              (log.first_topic_id == ^first_topic_id or log.first_topic == ^@message_passed_event) and
+              (log.second_topic == fragment("numeric_to_bytea32(msg_nonce)") or
+                 log.second_topic == fragment("bytea_ltrim_zeroes(numeric_to_bytea32(msg_nonce))"))
+        )
+
+      true ->
+        join(query, :left, [w, l2_transaction], log in Log,
+          on:
+            log.transaction_hash == w.l2_transaction_hash and log.first_topic == ^@message_passed_event and
+              log.second_topic == fragment("numeric_to_bytea32(msg_nonce)")
+        )
+    end
   end
 
   @doc """
@@ -198,6 +257,10 @@ defmodule Explorer.Chain.Optimism.Withdrawal do
     the same withdrawal, the function analyzes all the WithdrawalProven events and determines
     the current withdrawal status for each of them. The first success status is taken and returned
     as the final one.
+
+    The WithdrawalProven events which the OptimismPortal contract doesn't accept anymore
+    (see `void_proof?/4`) are ignored. If all the events are void, the withdrawal is treated
+    as an unproven one.
 
     ## Parameters
     - `w`: A map with the withdrawal info.
@@ -215,8 +278,6 @@ defmodule Explorer.Chain.Optimism.Withdrawal do
   def status(w, respected_games \\ nil, options \\ [])
 
   def status(w, respected_games, options) when is_nil(w.l1_transaction_hash) do
-    proven_events = proven_events_by_hash(w.hash)
-
     respected_games =
       if is_nil(respected_games) do
         respected_games(options)
@@ -224,9 +285,19 @@ defmodule Explorer.Chain.Optimism.Withdrawal do
         respected_games
       end
 
+    all_proven_events =
+      w.hash
+      |> proven_events_by_hash()
+      |> Enum.map(fn {l1_timestamp, game_address_hash, game_index} ->
+        {l1_timestamp, game_by_address_hash_or_index(game_address_hash, game_index)}
+      end)
+
+    fault_proofs_enabled? = all_proven_events != [] and fault_proofs_enabled?(respected_games)
+    proven_events = reject_void_proofs(all_proven_events, fault_proofs_enabled?)
+
     if proven_events == [] do
       cond do
-        appropriate_games_found(w.l2_block_number, respected_games) ->
+        appropriate_games_found(w, respected_games) ->
           {@withdrawal_status_ready_to_prove, nil}
 
         appropriate_root_found(w.l2_block_number) ->
@@ -236,7 +307,7 @@ defmodule Explorer.Chain.Optimism.Withdrawal do
           {@withdrawal_status_waiting_for_state_root, nil}
       end
     else
-      handle_proven_status(proven_events, respected_games)
+      handle_proven_status(proven_events, fault_proofs_enabled?)
     end
   end
 
@@ -250,7 +321,7 @@ defmodule Explorer.Chain.Optimism.Withdrawal do
   """
   @spec respected_games([Chain.api?()]) :: list()
   def respected_games(options) do
-    case Helper.parse_integer(Constants.get_constant_value("optimism_respected_game_type")) do
+    case respected_game_type() do
       nil ->
         []
 
@@ -282,13 +353,74 @@ defmodule Explorer.Chain.Optimism.Withdrawal do
     @proof_maturity_delay_seconds
   end
 
-  defp appropriate_games_found(withdrawal_l2_block_number, respected_games) do
-    respected_games
-    |> Enum.any?(fn game ->
-      l2_block_number = DisputeGame.l2_block_number_from_extra_data(game.extra_data)
-      withdrawal_l2_block_number <= l2_block_number
+  @doc """
+    Returns a name of the respected_game_type_updated_at constant.
+  """
+  @spec respected_game_type_updated_at_constant() :: binary()
+  def respected_game_type_updated_at_constant do
+    @respected_game_type_updated_at
+  end
+
+  # Reads the respected game type (the `respectedGameType` value of the OptimismPortal contract)
+  # stored by the `Indexer.Fetcher.Optimism.DisputeGame` module.
+  #
+  # ## Returns
+  # - The game type number, or `nil` if that's unknown (Fault Proofs are not active for the chain).
+  @spec respected_game_type() :: non_neg_integer() | nil
+  defp respected_game_type do
+    Helper.parse_integer(Constants.get_constant_value("optimism_respected_game_type"))
+  end
+
+  # Determines whether Fault Proofs are active for the chain, i.e. the respected game type is known.
+  #
+  # A non-empty list of respected games implies that, so the constant is only read when there are
+  # no indexed games of the respected type (e.g. right after the respected game type was changed,
+  # or while the dispute games are still being indexed).
+  #
+  # ## Parameters
+  # - `respected_games`: A list of games returned by the `respected_games(options)` function.
+  #
+  # ## Returns
+  # - `true` if Fault Proofs are active, `false` otherwise.
+  @spec fault_proofs_enabled?(list()) :: boolean()
+  defp fault_proofs_enabled?(respected_games) do
+    respected_games != [] or not is_nil(respected_game_type())
+  end
+
+  # Checks whether there is a respected dispute game the given withdrawal can be proven against.
+  #
+  # For the games with Output Root claim the withdrawal's L2 block number is compared with the L2 block number
+  # of the game. For the games with Super Root claim (OP Stack Upgrade 20) the game's `extraData` contains
+  # the L2 timestamp of the Super Root instead of L2 block number, so the timestamp of the withdrawal's L2 block
+  # is compared with it.
+  #
+  # ## Parameters
+  # - `w`: A map with the withdrawal info. Must contain `l2_block_number` and (for Super Root games) `l2_timestamp`.
+  # - `respected_games`: A list of games returned by the `respected_games(options)` function.
+  #
+  # ## Returns
+  # - `true` if an appropriate game is found, `false` otherwise.
+  @spec appropriate_games_found(map(), list()) :: boolean()
+  defp appropriate_games_found(w, respected_games) do
+    Enum.any?(respected_games, fn game ->
+      case DisputeGame.l2_sequence_number(game) do
+        {:block_number, game_l2_block_number} ->
+          w.l2_block_number <= game_l2_block_number
+
+        {:timestamp, game_l2_timestamp} ->
+          withdrawal_covered_by_timestamp?(Map.get(w, :l2_timestamp), game_l2_timestamp)
+      end
     end)
   end
+
+  # Checks whether the withdrawal's L2 block timestamp is covered by the Super Root game bound to the given L2 timestamp.
+  # Returns `false` if the withdrawal's L2 block timestamp is unknown (e.g. the L2 block is not indexed yet).
+  @spec withdrawal_covered_by_timestamp?(DateTime.t() | nil, non_neg_integer()) :: boolean()
+  defp withdrawal_covered_by_timestamp?(%DateTime{} = withdrawal_l2_timestamp, game_l2_timestamp) do
+    DateTime.to_unix(withdrawal_l2_timestamp) <= game_l2_timestamp
+  end
+
+  defp withdrawal_covered_by_timestamp?(_withdrawal_l2_timestamp, _game_l2_timestamp), do: false
 
   defp appropriate_root_found(withdrawal_l2_block_number) do
     last_root_l2_block_number =
@@ -337,26 +469,97 @@ defmodule Explorer.Chain.Optimism.Withdrawal do
     )
   end
 
+  # Removes the WithdrawalProven events which the OptimismPortal contract doesn't accept anymore
+  # from the given list (see `void_proof?/4` for details).
+  #
+  # ## Parameters
+  # - `proven_events`: A list of WithdrawalProven events. Each item is `{l1_timestamp, game}` tuple
+  #                    where `game` is the bound dispute game info (`nil` if unknown).
+  # - `fault_proofs_enabled?`: `true` if Fault Proofs are active for the chain.
+  #
+  # ## Returns
+  # - The list of the events which can still be used to finalize the withdrawal.
+  @spec reject_void_proofs([{DateTime.t(), map() | nil}], boolean()) :: [{DateTime.t(), map() | nil}]
+  defp reject_void_proofs([], _fault_proofs_enabled?), do: []
+
+  defp reject_void_proofs(proven_events, fault_proofs_enabled?) do
+    retirement_timestamp = retirement_timestamp()
+
+    Enum.reject(proven_events, fn {l1_timestamp, game} ->
+      void_proof?(l1_timestamp, game, retirement_timestamp, fault_proofs_enabled?)
+    end)
+  end
+
+  # Determines whether the given WithdrawalProven event is void, i.e. the OptimismPortal contract
+  # doesn't accept the corresponding proof anymore, so the withdrawal must be proven again.
+  #
+  # The contract only accepts a proof against a dispute game created after the retirement timestamp
+  # (`respectedGameTypeUpdatedAt`). The timestamp is set when Fault Proofs are activated and is moved
+  # forward when the games are retired (e.g. on the respected game type change). As a game cannot be
+  # created after the proof referencing it, any proof submitted at the retirement timestamp or before it
+  # is void. That covers the proofs made against L2OutputOracle before Fault Proofs activation as well.
+  #
+  # Regardless of the retirement timestamp, the contract requires the proof timestamp to be greater than
+  # the creation timestamp of the bound game. So, if Fault Proofs are active, a proof is also void when
+  # the bound game was created at the proof's timestamp or after it. The latter is the L2OutputOracle proof
+  # which `_l2OutputIndex` argument is stored as `game_index` (the both versions of
+  # the `proveWithdrawalTransaction` method have the same signature).
+  #
+  # ## Parameters
+  # - `l1_timestamp`: The L1 block timestamp of the WithdrawalProven event.
+  # - `game`: The bound dispute game info. Must be `nil` if unknown.
+  # - `retirement_timestamp`: The retirement timestamp. Must be `nil` if unknown.
+  # - `fault_proofs_enabled?`: `true` if Fault Proofs are active for the chain.
+  #
+  # ## Returns
+  # - `true` if the proof is void, `false` otherwise.
+  @spec void_proof?(DateTime.t(), map() | nil, DateTime.t() | nil, boolean()) :: boolean()
+  defp void_proof?(l1_timestamp, game, retirement_timestamp, fault_proofs_enabled?) do
+    cond do
+      not is_nil(retirement_timestamp) and DateTime.compare(l1_timestamp, retirement_timestamp) != :gt ->
+        true
+
+      not is_nil(retirement_timestamp) and not is_nil(game) and
+          DateTime.compare(game.created_at, retirement_timestamp) != :gt ->
+        true
+
+      true ->
+        fault_proofs_enabled? and not is_nil(game) and DateTime.compare(l1_timestamp, game.created_at) != :gt
+    end
+  end
+
+  # Reads the retirement timestamp (the `respectedGameTypeUpdatedAt` value of the OptimismPortal contract)
+  # stored by the `Indexer.Fetcher.Optimism.DisputeGame` module.
+  #
+  # ## Returns
+  # - The timestamp, or `nil` if that's unknown (e.g. Fault Proofs are not active for the chain).
+  @spec retirement_timestamp() :: DateTime.t() | nil
+  defp retirement_timestamp do
+    case Helper.parse_integer(Constants.get_constant_value(@respected_game_type_updated_at)) do
+      nil -> nil
+      timestamp -> DateTime.from_unix!(timestamp)
+    end
+  end
+
   # Determines the current withdrawal status by the list of the bound WithdrawalProven events.
   #
   # ## Parameters
-  # - `proven_events`: A list of WithdrawalProven events. Each item is `{l1_timestamp, game_address_hash, game_index}` tuple.
-  # - `respected_games`: A list of games returned by the `respected_games(options)` function.
+  # - `proven_events`: A non-empty list of WithdrawalProven events. Each item is `{l1_timestamp, game}` tuple
+  #                    where `game` is the bound dispute game info (`nil` if unknown).
+  # - `fault_proofs_enabled?`: `true` if Fault Proofs are active for the chain.
   #
   # ## Returns
   # - `{status, datetime}` tuple where the `status` is the current withdrawal status,
   #                        `datetime` is the point of time when the challenge period ends.
   #                        (only for `In challenge period` status).
-  @spec handle_proven_status(list(), list()) :: {String.t(), DateTime.t() | nil}
-  defp handle_proven_status(proven_events, respected_games) do
+  @spec handle_proven_status(list(), boolean()) :: {String.t(), DateTime.t() | nil}
+  defp handle_proven_status(proven_events, fault_proofs_enabled?) do
     statuses =
       proven_events
-      |> Enum.reduce_while([], fn {l1_timestamp, game_address_hash, game_index}, acc ->
-        game = game_by_address_hash_or_index(game_address_hash, game_index)
-
+      |> Enum.reduce_while([], fn {l1_timestamp, game}, acc ->
         # credo:disable-for-lines:16 Credo.Check.Refactor.PipeChainStart
         cond do
-          is_nil(game) and not Enum.empty?(respected_games) ->
+          is_nil(game) and fault_proofs_enabled? ->
             # here we cannot exactly determine the status `Waiting a game to resolve` or
             # `Ready for relay` or `In challenge period`
             # as we don't know the game index and address. In this case we display the `Proven` status
@@ -483,18 +686,6 @@ defmodule Explorer.Chain.Optimism.Withdrawal do
   """
   @spec portal_contract_address() :: String.t() | nil
   def portal_contract_address do
-    portal_address = Application.get_all_env(:indexer)[Indexer.Fetcher.Optimism][:portal]
-
-    if Indexer.Helper.address_correct?(portal_address) do
-      portal_address
-    else
-      Constants.get_constant_value(portal_contract_address_constant(), @api_true)
-    end
+    SuperchainConfig.optimism_l1_portal_contract()
   end
-
-  @doc """
-  Returns the name of the optimism_portal_contract_address constant.
-  """
-  @spec portal_contract_address_constant() :: binary()
-  def portal_contract_address_constant, do: "optimism_portal_contract_address"
 end

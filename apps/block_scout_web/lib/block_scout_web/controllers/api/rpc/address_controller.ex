@@ -155,6 +155,9 @@ defmodule BlockScoutWeb.API.RPC.AddressController do
     end
   end
 
+  # The pending check here is deliberately strict (no chain head tolerance, see
+  # `blocks_pending_below_head_tolerance?/2`): the response is all-or-nothing for a single
+  # transaction, so a pending block means the whole result is missing.
   def txlistinternal(conn, params, transaction_param, :transaction) do
     with {:params, {:ok, options}} <- {:params, optional_params(params)},
          {:format, {:ok, transaction_hash}} <- to_transaction_hash(transaction_param),
@@ -218,6 +221,9 @@ defmodule BlockScoutWeb.API.RPC.AddressController do
     end
   end
 
+  # With an empty result the pending status is the only useful information the response
+  # carries, so the strict check is kept here: pending blocks at the chain head are not
+  # tolerated (see `blocks_pending_below_head_tolerance?/2`).
   defp render_internal_transactions(conn, [], start_block_number, end_block_number) do
     if PendingOperationsHelper.blocks_pending?(start_block_number, end_block_number) do
       render(conn, :pending_internal_transaction,
@@ -230,7 +236,7 @@ defmodule BlockScoutWeb.API.RPC.AddressController do
   end
 
   defp render_internal_transactions(conn, internal_transactions, start_block_number, end_block_number) do
-    if PendingOperationsHelper.blocks_pending?(start_block_number, end_block_number) do
+    if blocks_pending_below_head_tolerance?(start_block_number, end_block_number) do
       render(conn, :pending_internal_transaction,
         message: @block_range_not_yet_processed_message,
         data: internal_transactions
@@ -238,6 +244,21 @@ defmodule BlockScoutWeb.API.RPC.AddressController do
     else
       render(conn, :txlistinternal, %{internal_transactions: internal_transactions})
     end
+  end
+
+  # Checks whether internal transactions of any block in the requested range are still
+  # being fetched, ignoring pending blocks at the chain head for ranges reaching the head
+  # (no `endblock`, or an `endblock` at or above the head such as the `99999999` sent by
+  # common Etherscan clients), see `PendingOperationsHelper.head_tolerant_max_block_number/1`.
+  #
+  # The tolerance only applies to responses that return internal transactions: an empty
+  # result and the single-transaction `txlistinternal` variant keep the strict check, since
+  # for them the pending status is the only information about the missing data.
+  defp blocks_pending_below_head_tolerance?(start_block_number, end_block_number) do
+    PendingOperationsHelper.blocks_pending?(
+      start_block_number,
+      PendingOperationsHelper.head_tolerant_max_block_number(end_block_number)
+    )
   end
 
   def tokentx(conn, params) do

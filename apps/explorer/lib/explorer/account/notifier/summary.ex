@@ -9,7 +9,8 @@ defmodule Explorer.Account.Notifier.Summary do
   alias Explorer
   alias Explorer.Account.Notifier.Summary
   alias Explorer.{Chain, Repo}
-  alias Explorer.Chain.{Transaction, Wei}
+  alias Explorer.Chain.{Token, TokenTransfer, Transaction, Wei}
+  alias Explorer.Chain.Token.ScaledUIAmount
 
   @unknown "Unknown"
 
@@ -51,14 +52,19 @@ defmodule Explorer.Account.Notifier.Summary do
   def handle_collection(_transaction, []), do: []
 
   def handle_collection(transaction, transfers_list) do
-    Enum.map(
-      transfers_list,
-      fn transfer ->
-        transaction
-        |> fetch_summary(transfer)
-      end
-    )
+    transfers_list
+    |> Enum.reject(&eip7708_system_transfer?/1)
+    |> Enum.map(fn transfer -> fetch_summary(transaction, transfer) end)
   end
+
+  # Token transfers derived from EIP-7708 protocol `Transfer` logs (emitter is SYSTEM_ADDRESS)
+  # mirror the native coin value that the coin summary already covers, so they must not
+  # produce a second notification with an unscaled amount of an "Unknown" token.
+  defp eip7708_system_transfer?(%Chain.TokenTransfer{token_contract_address_hash: token_contract_address_hash}) do
+    to_string(token_contract_address_hash) == TokenTransfer.eip7708_system_address()
+  end
+
+  defp eip7708_system_transfer?(_), do: false
 
   defp fetch_summary(%Chain.Transaction{block_number: nil}), do: :nothing
 
@@ -101,14 +107,14 @@ defmodule Explorer.Account.Notifier.Summary do
          %Chain.TokenTransfer{} = transfer
        ) do
     case transfer.token.type do
-      type when type in ["ERC-20", "ZRC-2"] ->
+      type when type in ["ERC-20", "ERC-8056", "ZRC-2"] ->
         %Summary{
           transaction_hash: transaction.hash,
           method: method(transfer),
           from_address_hash: transfer.from_address_hash,
           to_address_hash: transfer.to_address_hash,
           block_number: transfer.block_number,
-          amount: amount(transfer),
+          amount: amount(transfer, transaction.block_timestamp),
           subject: transfer.token.type,
           transaction_fee: fee(transaction),
           name: token_name(transfer),
@@ -147,7 +153,7 @@ defmodule Explorer.Account.Notifier.Summary do
         token_ids_string = token_ids(transfer)
 
         %Summary{
-          amount: amount(transfer),
+          amount: amount(transfer, transaction.block_timestamp),
           transaction_hash: transaction.hash,
           method: method(transfer),
           from_address_hash: transfer.from_address_hash,
@@ -195,9 +201,9 @@ defmodule Explorer.Account.Notifier.Summary do
     Wei.to(transaction.value, :ether)
   end
 
-  defp amount(%Chain.TokenTransfer{amount: amount}) when is_nil(amount), do: nil
+  defp amount(%Chain.TokenTransfer{amount: amount}, _at) when is_nil(amount), do: nil
 
-  defp amount(%Chain.TokenTransfer{amount: amount} = transfer) do
+  defp amount(%Chain.TokenTransfer{amount: amount} = transfer, at) do
     decimals =
       Decimal.new(
         Integer.pow(
@@ -206,10 +212,9 @@ defmodule Explorer.Account.Notifier.Summary do
         )
       )
 
-    Decimal.div(
-      amount,
-      decimals
-    )
+    amount
+    |> ScaledUIAmount.scale(Token.effective_ui_multiplier(transfer.token, at || DateTime.utc_now()))
+    |> Decimal.div(decimals)
   end
 
   defp token_ids(%Chain.TokenTransfer{token_ids: nil}), do: ""

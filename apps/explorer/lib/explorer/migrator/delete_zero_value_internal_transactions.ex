@@ -14,10 +14,11 @@ defmodule Explorer.Migrator.DeleteZeroValueInternalTransactions do
   alias Explorer.Chain.Cache.Counters.AverageBlockTime
   alias Explorer.Migrator.MigrationStatus
   alias Explorer.Repo
-  alias Explorer.Utility.{AddressIdToAddressHash, InternalTransactionsAddressPlaceholder}
+  alias Explorer.Utility.InternalTransactionsAddressPlaceholder
   alias Timex.Duration
 
   @migration_name "delete_zero_value_internal_transactions"
+  @shrink_internal_transactions_migration_name "shrink_internal_transactions"
   @not_completed_check_interval 10
   @default_check_interval :timer.minutes(1)
   @default_batch_size 100
@@ -41,22 +42,13 @@ defmodule Explorer.Migrator.DeleteZeroValueInternalTransactions do
   end
 
   @impl true
-  def handle_continue(:ok, _state) do
-    state =
-      case MigrationStatus.fetch(@migration_name) do
-        nil ->
-          state = %{"max_block_number" => -1}
-          MigrationStatus.set_status(@migration_name, "started")
-          MigrationStatus.update_meta(@migration_name, state)
-          state
+  def handle_continue(:ok, state) do
+    check_dependency_and_start(state)
+  end
 
-        %{meta: meta} ->
-          meta
-      end
-
-    schedule_check()
-
-    {:noreply, state}
+  @impl true
+  def handle_info(:check_dependency, state) do
+    check_dependency_and_start(state)
   end
 
   @impl true
@@ -80,8 +72,40 @@ defmodule Explorer.Migrator.DeleteZeroValueInternalTransactions do
     {:noreply, new_state}
   end
 
+  defp check_dependency_and_start(state) do
+    shrink_config = Application.get_env(:explorer, Explorer.Migrator.ShrinkInternalTransactions) || []
+    shrink_enabled? = shrink_config[:enabled] != false
+    shrink_status = MigrationStatus.get_status(@shrink_internal_transactions_migration_name)
+
+    if shrink_enabled? && shrink_status != "completed" do
+      schedule_dependency_check()
+      {:noreply, state}
+    else
+      state =
+        case MigrationStatus.fetch(@migration_name) do
+          nil ->
+            state = %{"max_block_number" => -1}
+            MigrationStatus.set_status(@migration_name, "started")
+            MigrationStatus.update_meta(@migration_name, state)
+            state
+
+          %{status: "started", meta: %{"completed" => true} = meta} ->
+            MigrationStatus.set_status(@migration_name, "completed")
+            meta
+
+          %{meta: meta} ->
+            meta
+        end
+
+      schedule_check()
+      {:noreply, state}
+    end
+  end
+
+  # The range is inclusive on both ends, so it may consist of a single block: this happens
+  # when the previous batch ended exactly one block below the border block.
   defp clear_internal_transactions(from_number, to_number)
-       when is_integer(from_number) and is_integer(to_number) and from_number < to_number do
+       when is_integer(from_number) and is_integer(to_number) and from_number <= to_number do
     dynamic_condition = dynamic([it], it.block_number >= ^from_number and it.block_number <= ^to_number)
 
     do_clear_internal_transactions(dynamic_condition)
@@ -110,9 +134,7 @@ defmodule Explorer.Migrator.DeleteZeroValueInternalTransactions do
             inner_join: locked_it in subquery(locked_internal_transactions_to_delete_query),
             on: join_on_ctid(it, locked_it),
             select: %{
-              from_address_hash: it.from_address_hash,
               from_address_id: it.from_address_id,
-              to_address_hash: it.to_address_hash,
               to_address_id: it.to_address_id,
               block_number: it.block_number,
               index: it.index
@@ -120,23 +142,6 @@ defmodule Explorer.Migrator.DeleteZeroValueInternalTransactions do
           )
 
         {_count, deleted_internal_transactions} = Repo.delete_all(delete_query, timeout: :infinity)
-
-        address_hashes =
-          deleted_internal_transactions
-          |> Enum.flat_map(&[&1.from_address_hash, &1.to_address_hash])
-          |> Enum.uniq()
-          |> Enum.reject(&is_nil/1)
-
-        id_to_address_params = Enum.map(address_hashes, &%{address_hash: &1})
-
-        Repo.insert_all(AddressIdToAddressHash, id_to_address_params, on_conflict: :nothing)
-
-        address_to_id_map =
-          AddressIdToAddressHash
-          |> where([a], a.address_hash in ^address_hashes)
-          |> select([a], {a.address_hash, a.address_id})
-          |> Repo.all()
-          |> Map.new()
 
         placeholders_params =
           deleted_internal_transactions
@@ -148,11 +153,8 @@ defmodule Explorer.Migrator.DeleteZeroValueInternalTransactions do
                 inner_acc
 
               internal_transaction, inner_acc ->
-                from_address_id =
-                  internal_transaction.from_address_id || address_to_id_map[internal_transaction.from_address_hash]
-
-                to_address_id =
-                  internal_transaction.to_address_id || address_to_id_map[internal_transaction.to_address_hash]
+                from_address_id = internal_transaction.from_address_id
+                to_address_id = internal_transaction.to_address_id
 
                 inner_acc
                 |> Map.update(
@@ -213,6 +215,11 @@ defmodule Explorer.Migrator.DeleteZeroValueInternalTransactions do
 
   defp schedule_check(completed? \\ false) do
     Process.send_after(self(), :update, (completed? && completed_check_interval()) || @not_completed_check_interval)
+  end
+
+  defp schedule_dependency_check do
+    interval = Application.get_env(:explorer, __MODULE__)[:dependency_check_interval] || :timer.hours(1)
+    Process.send_after(self(), :check_dependency, interval)
   end
 
   defp completed_check_interval do

@@ -49,8 +49,8 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  OTP_VERSION: "27.3.4.6"
-  ELIXIR_VERSION: "1.19.4"
+  OTP_VERSION: "29.1.2"
+  ELIXIR_VERSION: "1.20.5"
   MIX_ENV: prod
   DOS_NAMES_REPOSITORY: https://github.com/DOS/DOS-Names-Contracts.git
   DOS_NAMES_SUBGRAPH_REF: 2d47fb77bb09dcbdc9d7bfeee77d12ddbebc2e4d
@@ -261,6 +261,7 @@ jobs:
             libswscale-dev \
             libtool \
             make \
+            pkg-config \
             python3
 
       - name: Compile production application

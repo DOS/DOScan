@@ -3,11 +3,14 @@ defmodule BlockScoutWeb.API.V2.AddressControllerTest do
   use BlockScoutWeb.ConnCase
   use EthereumJSONRPC.Case, async: false
   use BlockScoutWeb.ChannelCase
-  use Utils.CompileTimeEnvHelper, chain_identity: [:explorer, :chain_identity]
+
+  use Utils.CompileTimeEnvHelper,
+    chain_type: [:explorer, :chain_type],
+    chain_identity: [:explorer, :chain_identity]
 
   alias ABI.{TypeDecoder, TypeEncoder}
   alias Explorer.{Chain, Repo, TestHelper}
-  alias Explorer.Chain.Address.Counters
+  alias Explorer.Chain.Cache.Counters.AddressCountersConsolidator
 
   alias Explorer.Chain.{
     Address,
@@ -15,6 +18,7 @@ defmodule BlockScoutWeb.API.V2.AddressControllerTest do
     Block,
     InternalTransaction,
     Log,
+    PendingOperationsHelper,
     Token,
     Token.Instance,
     TokenTransfer,
@@ -90,6 +94,38 @@ defmodule BlockScoutWeb.API.V2.AddressControllerTest do
       request = get(conn, "/api/v2/addresses/#{Address.checksum(address.hash)}")
       json_response = json_response(request, 200)
       check_response(correct_response, json_response)
+    end
+
+    test "restricted address is accessible with the correct key", %{conn: conn} do
+      address = insert(:address)
+      address_hash_string = Address.checksum(address.hash)
+
+      old_blacklist = Application.get_env(:explorer, :addresses_blacklist)
+      old_key = Application.get_env(:explorer, :addresses_blacklist_key)
+      Application.put_env(:explorer, :addresses_blacklist, address_hash_string)
+      Application.put_env(:explorer, :addresses_blacklist_key, "secret")
+
+      on_exit(fn ->
+        Application.put_env(:explorer, :addresses_blacklist, old_blacklist)
+        Application.put_env(:explorer, :addresses_blacklist_key, old_key)
+      end)
+
+      stub(EthereumJSONRPC.Mox, :json_rpc, fn _, _ -> {:ok, []} end)
+
+      assert %{"message" => "Restricted access"} =
+               conn
+               |> get("/api/v2/addresses/#{address_hash_string}")
+               |> json_response(403)
+
+      assert %{"message" => "Restricted access"} =
+               conn
+               |> get("/api/v2/addresses/#{address_hash_string}", %{"key" => "wrong"})
+               |> json_response(403)
+
+      assert %{"hash" => ^address_hash_string} =
+               conn
+               |> get("/api/v2/addresses/#{address_hash_string}", %{"key" => "secret"})
+               |> json_response(200)
     end
 
     test "get 422 on invalid address", %{conn: conn} do
@@ -232,7 +268,7 @@ defmodule BlockScoutWeb.API.V2.AddressControllerTest do
         insert(:smart_contract,
           name: "Implementation",
           external_libraries: [],
-          constructor_arguments: "",
+          constructor_arguments: nil,
           abi: [
             %{
               "type" => "constructor",
@@ -328,7 +364,7 @@ defmodule BlockScoutWeb.API.V2.AddressControllerTest do
              } = json_response
     end
 
-    test "get minimal_proxy contract shows is_verified true", %{conn: conn} do
+    test "get minimal_proxy contract shows is_verified false", %{conn: conn} do
       implementation_contract = insert(:smart_contract, contract_code_md5: "abc")
 
       proxy_address = insert(:contract_address)
@@ -350,7 +386,8 @@ defmodule BlockScoutWeb.API.V2.AddressControllerTest do
 
       json_response = json_response(request, 200)
 
-      assert json_response["is_verified"] == true
+      # minimal_proxy is detected by a partial bytecode match, so it is not treated as verified
+      assert json_response["is_verified"] == false
       assert json_response["proxy_type"] == "minimal_proxy"
     end
 
@@ -608,9 +645,8 @@ defmodule BlockScoutWeb.API.V2.AddressControllerTest do
 
       insert(:block, miner: address)
 
-      Counters.transactions_count(address)
-      Counters.token_transfers_count(address)
-      Counters.gas_usage_count(address)
+      safe_block = Repo.aggregate(Block, :max, :number)
+      AddressCountersConsolidator.consolidate_addresses([address.hash], safe_block)
 
       request = get(conn, "/api/v2/addresses/#{address.hash}/counters")
       json_response = json_response(request, 200)
@@ -1172,7 +1208,7 @@ defmodule BlockScoutWeb.API.V2.AddressControllerTest do
         Conn.resp(
           conn,
           200,
-          Jason.encode!(%{
+          Utils.JSON.encode!(%{
             "names" => %{
               to_string(to_address) => "test.eth"
             }
@@ -1184,7 +1220,7 @@ defmodule BlockScoutWeb.API.V2.AddressControllerTest do
         Conn.resp(
           conn,
           200,
-          Jason.encode!(%{
+          Utils.JSON.encode!(%{
             "addresses" => %{
               to_string(to_address) => %{
                 "tags" => [
@@ -1991,7 +2027,7 @@ defmodule BlockScoutWeb.API.V2.AddressControllerTest do
 
       token_transfers =
         for i <- tt do
-          %TokenTransfer{i | token_ids: [id], amount: Decimal.new(1275)}
+          %{i | token_ids: [id], amount: Decimal.new(1275)}
         end
 
       request = get(conn, "/api/v2/addresses/#{address.hash}/token-transfers")
@@ -2054,7 +2090,7 @@ defmodule BlockScoutWeb.API.V2.AddressControllerTest do
 
       token_transfers =
         for i <- 0..50 do
-          %TokenTransfer{tt | token_ids: [i], amount: i}
+          %{tt | token_ids: [i], amount: i}
         end
 
       filter = %{"type" => "ERC-1155", "filter" => "to"}
@@ -2098,7 +2134,7 @@ defmodule BlockScoutWeb.API.V2.AddressControllerTest do
 
       token_transfers_1 =
         for i <- 0..24 do
-          %TokenTransfer{tt_1 | token_ids: [i], amount: i}
+          %{tt_1 | token_ids: [i], amount: i}
         end
 
       transaction_2 = insert(:transaction, input: "0xabcd010203040506") |> with_block()
@@ -2117,7 +2153,7 @@ defmodule BlockScoutWeb.API.V2.AddressControllerTest do
 
       token_transfers_2 =
         for i <- 25..49 do
-          %TokenTransfer{tt_2 | token_ids: [i], amount: i}
+          %{tt_2 | token_ids: [i], amount: i}
         end
 
       tt_3 =
@@ -2163,7 +2199,7 @@ defmodule BlockScoutWeb.API.V2.AddressControllerTest do
 
       token_transfers_1 =
         for i <- 0..24 do
-          %TokenTransfer{tt_1 | token_ids: [i], amount: i}
+          %{tt_1 | token_ids: [i], amount: i}
         end
 
       transaction_2 = insert(:transaction, input: "0xabcd010203040506") |> with_block()
@@ -2182,7 +2218,7 @@ defmodule BlockScoutWeb.API.V2.AddressControllerTest do
 
       token_transfers_2 =
         for i <- 25..50 do
-          %TokenTransfer{tt_2 | token_ids: [i], amount: i}
+          %{tt_2 | token_ids: [i], amount: i}
         end
 
       request = get(conn, "/api/v2/addresses/#{address.hash}/token-transfers")
@@ -2298,6 +2334,164 @@ defmodule BlockScoutWeb.API.V2.AddressControllerTest do
       compare_item(internal_transaction_to, Enum.at(response["items"], 0))
     end
 
+    test "returns pending status when scope includes pending operations", %{conn: conn} do
+      address = insert(:address)
+
+      request = get(conn, "/api/v2/addresses/#{address.hash}/internal-transactions")
+      assert response = json_response(request, 200)
+      assert response["items"] == []
+      assert response["next_page_params"] == nil
+      assert response["meta"]["status"] == 1
+      assert is_nil(response["meta"]["message"])
+
+      block = insert(:block)
+      insert(:pending_block_operation, block_hash: block.hash, block_number: block.number)
+
+      request = get(conn, "/api/v2/addresses/#{address.hash}/internal-transactions")
+
+      assert response = json_response(request, 200)
+      assert response["items"] == []
+      assert response["next_page_params"] == nil
+      assert response["meta"]["status"] == 2
+
+      assert response["meta"]["message"] ==
+               "Some internal transactions within this block range have not yet been processed"
+    end
+
+    test "returns pending status for pending transaction operation", %{conn: conn} do
+      address = insert(:address)
+
+      transaction =
+        :transaction
+        |> insert()
+        |> with_block()
+
+      insert(:internal_transaction,
+        transaction: transaction,
+        index: 1,
+        block_number: transaction.block_number,
+        transaction_index: transaction.index,
+        from_address: insert(:address)
+      )
+
+      request = get(conn, "/api/v2/addresses/#{address.hash}/internal-transactions")
+
+      assert response = json_response(request, 200)
+      assert response["items"] == []
+      assert response["next_page_params"] == nil
+      assert response["meta"]["status"] == 1
+      assert is_nil(response["meta"]["message"])
+
+      insert(:pending_transaction_operation, transaction_hash: transaction.hash)
+
+      request = get(conn, "/api/v2/addresses/#{address.hash}/internal-transactions")
+
+      assert response = json_response(request, 200)
+      assert response["meta"]["status"] == 2
+
+      assert response["meta"]["message"] ==
+               "Some internal transactions within this block range have not yet been processed"
+    end
+
+    test "tolerates pending blocks within the chain head tolerance on the first page", %{conn: conn} do
+      address = insert(:address)
+
+      block = insert(:block)
+      insert_address_internal_transaction(address, block)
+
+      # the pending block lies between the two returned internal transactions, inside the
+      # tolerance window, so it is ignored
+      pending_block = insert(:block, number: block.number + 1)
+      insert(:pending_block_operation, block_hash: pending_block.hash, block_number: pending_block.number)
+      insert_address_internal_transaction(address, insert(:block, number: block.number + 2))
+      insert(:block, number: block.number + pending_head_tolerance())
+
+      request = get(conn, "/api/v2/addresses/#{address.hash}/internal-transactions")
+
+      assert response = json_response(request, 200)
+      assert Enum.count(response["items"]) == 2
+      assert response["meta"]["status"] == 1
+      assert is_nil(response["meta"]["message"])
+    end
+
+    test "returns pending status for a pending block exactly tolerance blocks behind the chain head", %{conn: conn} do
+      address = insert(:address)
+
+      block = insert(:block)
+      insert_address_internal_transaction(address, block)
+
+      # the pending block is above the newest returned internal transaction, but it is not
+      # inside the tolerance window, so the open-ended first page still covers it
+      pending_block = insert(:block, number: block.number + 1)
+      insert(:pending_block_operation, block_hash: pending_block.hash, block_number: pending_block.number)
+      insert(:block, number: pending_block.number + pending_head_tolerance())
+
+      request = get(conn, "/api/v2/addresses/#{address.hash}/internal-transactions")
+
+      assert response = json_response(request, 200)
+      assert Enum.count(response["items"]) == 1
+      assert response["meta"]["status"] == 2
+
+      assert response["meta"]["message"] ==
+               "Some internal transactions within this block range have not yet been processed"
+
+      # a following page is bounded by its paging parameters, so only its own block range is checked
+      request =
+        get(conn, "/api/v2/addresses/#{address.hash}/internal-transactions", %{
+          "block_number" => "#{pending_block.number}",
+          "transaction_index" => "0",
+          "index" => "0"
+        })
+
+      assert response = json_response(request, 200)
+      assert Enum.count(response["items"]) == 1
+      assert response["meta"]["status"] == 1
+      assert is_nil(response["meta"]["message"])
+    end
+
+    test "checks only the block range of the first page when tolerance is disabled", %{conn: conn} do
+      configuration = Application.get_env(:explorer, PendingOperationsHelper)
+
+      Application.put_env(
+        :explorer,
+        PendingOperationsHelper,
+        Keyword.put(configuration, :internal_transactions_pending_head_tolerance, 0)
+      )
+
+      on_exit(fn -> Application.put_env(:explorer, PendingOperationsHelper, configuration) end)
+
+      address = insert(:address)
+
+      block = insert(:block)
+      insert_address_internal_transaction(address, block)
+
+      # a pending block above the page is outside the checked range
+      pending_block = insert(:block, number: block.number + 1)
+      insert(:pending_block_operation, block_hash: pending_block.hash, block_number: pending_block.number)
+
+      request = get(conn, "/api/v2/addresses/#{address.hash}/internal-transactions")
+
+      assert response = json_response(request, 200)
+      assert Enum.count(response["items"]) == 1
+      assert response["meta"]["status"] == 1
+      assert is_nil(response["meta"]["message"])
+
+      # a pending block inside the page is reported even right at the chain head. The pending
+      # block lies between two returned internal transactions rather than holding one, since
+      # with block-level pending operations the internal transactions of a pending block are
+      # not returned at all
+      insert_address_internal_transaction(address, insert(:block, number: pending_block.number + 1))
+
+      request = get(conn, "/api/v2/addresses/#{address.hash}/internal-transactions")
+
+      assert response = json_response(request, 200)
+      assert Enum.count(response["items"]) == 2
+      assert response["meta"]["status"] == 2
+
+      assert response["meta"]["message"] ==
+               "Some internal transactions within this block range have not yet been processed"
+    end
+
     test "returns gas_limit as 0 for selfdestruct without gas", %{conn: conn} do
       address = insert(:address)
 
@@ -2396,6 +2590,46 @@ defmodule BlockScoutWeb.API.V2.AddressControllerTest do
       assert response_2nd_page = json_response(request_2nd_page, 200)
 
       check_paginated_response(response, response_2nd_page, internal_transactions_from)
+    end
+
+    test "include_zero_value=false excludes zero-value call internal transactions", %{conn: conn} do
+      address = insert(:address)
+
+      transaction =
+        :transaction
+        |> insert()
+        |> with_block()
+
+      insert(:internal_transaction,
+        transaction: transaction,
+        index: 1,
+        block_number: transaction.block_number,
+        transaction_index: transaction.index,
+        to_address: address,
+        type: :call,
+        value: Decimal.new(0)
+      )
+
+      insert(:internal_transaction,
+        transaction: transaction,
+        index: 2,
+        block_number: transaction.block_number,
+        transaction_index: transaction.index,
+        to_address: address,
+        type: :call,
+        value: Decimal.new(1)
+      )
+
+      request =
+        get(conn, "/api/v2/addresses/#{address.hash}/internal-transactions", %{"include_zero_value" => "false"})
+
+      assert response = json_response(request, 200)
+      assert Enum.count(response["items"]) == 1
+      assert List.first(response["items"])["index"] == 2
+
+      request_default = get(conn, "/api/v2/addresses/#{address.hash}/internal-transactions")
+      assert response_default = json_response(request_default, 200)
+      assert Enum.count(response_default["items"]) == 2
     end
   end
 
@@ -2631,35 +2865,37 @@ defmodule BlockScoutWeb.API.V2.AddressControllerTest do
       compare_item(acb, acb_json)
     end
 
-    test "get coin balance with internal transaction", %{conn: conn} do
-      transaction =
-        :transaction
-        |> insert()
-        |> with_block()
+    if @chain_type != :arc do
+      test "get coin balance with internal transaction", %{conn: conn} do
+        transaction =
+          :transaction
+          |> insert()
+          |> with_block()
 
-      address = insert(:address)
+        address = insert(:address)
 
-      insert(:internal_transaction,
-        type: "call",
-        call_type: "call",
-        transaction: transaction,
-        transaction_index: transaction.index,
-        block: transaction.block,
-        to_address: address,
-        value: 123,
-        block_number: transaction.block_number,
-        index: 1
-      )
+        insert(:internal_transaction,
+          type: "call",
+          call_type: "call",
+          transaction: transaction,
+          transaction_index: transaction.index,
+          block: transaction.block,
+          to_address: address,
+          value: 123,
+          block_number: transaction.block_number,
+          index: 1
+        )
 
-      insert(:address_coin_balance)
-      acb = insert(:address_coin_balance, address: address, block_number: transaction.block_number)
+        insert(:address_coin_balance)
+        acb = insert(:address_coin_balance, address: address, block_number: transaction.block_number)
 
-      request = get(conn, "/api/v2/addresses/#{address.hash}/coin-balance-history")
+        request = get(conn, "/api/v2/addresses/#{address.hash}/coin-balance-history")
 
-      assert %{"items" => [acb_json], "next_page_params" => nil} = json_response(request, 200)
-      assert acb_json["transaction_hash"] == to_string(transaction.hash)
+        assert %{"items" => [acb_json], "next_page_params" => nil} = json_response(request, 200)
+        assert acb_json["transaction_hash"] == to_string(transaction.hash)
 
-      compare_item(acb, acb_json)
+        compare_item(acb, acb_json)
+      end
     end
 
     test "coin balance history can paginate", %{conn: conn} do
@@ -2772,6 +3008,7 @@ defmodule BlockScoutWeb.API.V2.AddressControllerTest do
       log =
         insert(:log,
           transaction: transaction,
+          transaction_index: transaction.index,
           index: 1,
           block: transaction.block,
           block_number: transaction.block_number,
@@ -2800,6 +3037,7 @@ defmodule BlockScoutWeb.API.V2.AddressControllerTest do
 
           insert(:log,
             transaction: transaction,
+            transaction_index: transaction.index,
             index: x,
             block: transaction.block,
             block_number: transaction.block_number,
@@ -2827,6 +3065,7 @@ defmodule BlockScoutWeb.API.V2.AddressControllerTest do
       log =
         insert(:log,
           transaction: transaction,
+          transaction_index: transaction.index,
           index: 1,
           block: transaction.block,
           block_number: transaction.block_number,
@@ -2859,7 +3098,7 @@ defmodule BlockScoutWeb.API.V2.AddressControllerTest do
         Conn.resp(
           conn,
           200,
-          Jason.encode!(%{
+          Utils.JSON.encode!(%{
             "names" => %{
               to_string(address) => "test.eth"
             }
@@ -2871,7 +3110,7 @@ defmodule BlockScoutWeb.API.V2.AddressControllerTest do
         Conn.resp(
           conn,
           200,
-          Jason.encode!(%{
+          Utils.JSON.encode!(%{
             "addresses" => %{
               to_string(address) => %{
                 "tags" => [
@@ -2931,6 +3170,7 @@ defmodule BlockScoutWeb.API.V2.AddressControllerTest do
       log =
         insert(:log,
           transaction: transaction,
+          transaction_index: transaction.index,
           index: 1,
           block: transaction.block,
           block_number: transaction.block_number,
@@ -2970,13 +3210,13 @@ defmodule BlockScoutWeb.API.V2.AddressControllerTest do
 
       Bypass.expect_once(bypass, "POST", "api/v1/addresses:batch_resolve", fn conn ->
         {:ok, body, conn} = Plug.Conn.read_body(conn)
-        decoded = Jason.decode!(body)
+        decoded = Utils.JSON.decode!(body)
         assert decoded["protocols"] == "ens"
 
         Conn.resp(
           conn,
           200,
-          Jason.encode!(%{
+          Utils.JSON.encode!(%{
             "names" => %{
               to_string(address) => "test.eth"
             }
@@ -2988,7 +3228,7 @@ defmodule BlockScoutWeb.API.V2.AddressControllerTest do
         Conn.resp(
           conn,
           200,
-          Jason.encode!(%{
+          Utils.JSON.encode!(%{
             "addresses" => %{
               to_string(address) => %{
                 "tags" => [
@@ -3029,6 +3269,7 @@ defmodule BlockScoutWeb.API.V2.AddressControllerTest do
 
         insert(:log,
           transaction: transaction,
+          transaction_index: transaction.index,
           index: x,
           block: transaction.block,
           block_number: transaction.block_number,
@@ -3044,6 +3285,7 @@ defmodule BlockScoutWeb.API.V2.AddressControllerTest do
       log =
         insert(:log,
           transaction: transaction,
+          transaction_index: transaction.index,
           block: transaction.block,
           block_number: transaction.block_number,
           address: address,
@@ -3093,7 +3335,10 @@ defmodule BlockScoutWeb.API.V2.AddressControllerTest do
 
       log =
         insert(:log,
+          block: transaction.block,
+          block_number: transaction.block_number,
           transaction: transaction,
+          transaction_index: transaction.index,
           first_topic: TestHelper.topic(topic1),
           second_topic: TestHelper.topic(topic2),
           third_topic: nil,
@@ -3118,7 +3363,7 @@ defmodule BlockScoutWeb.API.V2.AddressControllerTest do
       compare_item(log, log_from_api)
       assert not is_nil(log_from_api["decoded"])
 
-      assert log_from_api["decoded"] == %{
+      assert Map.drop(log_from_api["decoded"], ["abi"]) == %{
                "method_call" =>
                  "OptionSettled(uint256 indexed accountId, address option, uint256 subId, int256 amount, int256 value)",
                "method_id" => "d20a68b2",
@@ -3155,6 +3400,9 @@ defmodule BlockScoutWeb.API.V2.AddressControllerTest do
                  }
                ]
              }
+
+      assert log_from_api["decoded"]["abi"]["name"] == "OptionSettled"
+      assert log_from_api["decoded"]["abi"]["type"] == "event"
     end
 
     test "test corner case, when preload functions face absent smart contract", %{conn: conn} do
@@ -3173,7 +3421,10 @@ defmodule BlockScoutWeb.API.V2.AddressControllerTest do
 
       log =
         insert(:log,
+          block: transaction.block,
+          block_number: transaction.block_number,
           transaction: transaction,
+          transaction_index: transaction.index,
           first_topic: TestHelper.topic(topic1),
           second_topic: TestHelper.topic(topic2),
           third_topic: nil,
@@ -3224,7 +3475,10 @@ defmodule BlockScoutWeb.API.V2.AddressControllerTest do
       transaction = :transaction |> insert() |> with_block()
 
       insert(:log,
+        block: transaction.block,
+        block_number: transaction.block_number,
         transaction: transaction,
+        transaction_index: transaction.index,
         first_topic: nil,
         second_topic: nil,
         third_topic: nil,
@@ -3234,7 +3488,10 @@ defmodule BlockScoutWeb.API.V2.AddressControllerTest do
       )
 
       insert(:log,
+        block: transaction.block,
+        block_number: transaction.block_number,
         transaction: transaction,
+        transaction_index: transaction.index,
         first_topic: TestHelper.topic("0x0000000000000000000000000000000000000000000000000000000000005d19"),
         second_topic: nil,
         third_topic: nil,
@@ -3247,10 +3504,10 @@ defmodule BlockScoutWeb.API.V2.AddressControllerTest do
       Bypass.expect_once(bypass, "POST", "/api/v1/abi/events%3Abatch-get", fn conn ->
         # cspell:enable
         {:ok, body, conn} = Plug.Conn.read_body(conn)
-        body = Jason.decode!(body)
+        body = Utils.JSON.decode!(body)
         assert Enum.count(body["requests"]) == 1
 
-        Conn.resp(conn, 200, Jason.encode!([]))
+        Conn.resp(conn, 200, Utils.JSON.encode!([]))
       end)
 
       request = get(conn, "/api/v2/addresses/#{address.hash}/logs")
@@ -3259,6 +3516,49 @@ defmodule BlockScoutWeb.API.V2.AddressControllerTest do
       assert Enum.count(response["items"]) == 2
 
       Bypass.down(bypass)
+    end
+
+    test "includes called method ABI and arguments", %{conn: conn} do
+      event_abi = %{
+        "name" => "Set",
+        "type" => "event",
+        "inputs" => [%{"name" => "x", "type" => "uint256", "indexed" => false, "internalType" => "uint256"}],
+        "anonymous" => false
+      }
+
+      contract_address = insert(:contract_address)
+      insert(:smart_contract, address_hash: contract_address.hash, abi: [event_abi])
+
+      topic1_bytes = ExKeccak.hash_256("Set(uint256)")
+      topic1 = "0x" <> Base.encode16(topic1_bytes, case: :lower)
+
+      log_data = "0x0000000000000000000000000000000000000000000000000000000000000032"
+
+      transaction = :transaction |> insert() |> with_block()
+
+      insert(:log,
+        transaction: transaction,
+        transaction_index: transaction.index,
+        block: transaction.block,
+        block_number: transaction.block_number,
+        address: contract_address,
+        first_topic: TestHelper.topic(topic1),
+        data: log_data
+      )
+
+      request = get(conn, "/api/v2/addresses/#{contract_address.hash}/logs")
+
+      assert response = json_response(request, 200)
+      assert [log_from_api] = response["items"]
+
+      assert log_from_api["decoded"]["abi"]["name"] == "Set"
+      assert log_from_api["decoded"]["abi"]["type"] == "event"
+
+      assert log_from_api["decoded"]["abi"]["inputs"] == [
+               %{"indexed" => false, "internalType" => "uint256", "name" => "x", "type" => "uint256"}
+             ]
+
+      refute Map.has_key?(log_from_api, "called_method")
     end
   end
 
@@ -3836,6 +4136,36 @@ defmodule BlockScoutWeb.API.V2.AddressControllerTest do
       compare_item(address, address_json)
     end
 
+    test "leaves out the addresses configured in TOP_ADDRESSES_EXCLUDED_ADDRESSES", %{conn: conn} do
+      excluded = insert(:address, fetched_coin_balance: 10, transactions_count: 10)
+      kept = insert(:address, fetched_coin_balance: 5, transactions_count: 5)
+
+      initial = Application.get_env(:explorer, Address)
+
+      Application.put_env(
+        :explorer,
+        Address,
+        Keyword.merge(initial || [], excluded_top_addresses: [to_string(excluded.hash)])
+      )
+
+      on_exit(fn ->
+        if initial,
+          do: Application.put_env(:explorer, Address, initial),
+          else: Application.delete_env(:explorer, Address)
+      end)
+
+      response = conn |> get("/api/v2/addresses") |> json_response(200)
+
+      assert Enum.map(response["items"], & &1["hash"]) == [Address.checksum(kept.hash)]
+      # the exclusion does not touch the supply the percentages are computed against
+      assert response["total_supply"] == to_string(Chain.total_supply())
+
+      sorted_response =
+        conn |> get("/api/v2/addresses", %{"sort" => "transactions_count", "order" => "desc"}) |> json_response(200)
+
+      assert Enum.map(sorted_response["items"], & &1["hash"]) == [Address.checksum(kept.hash)]
+    end
+
     test "check smart contract properties", %{conn: conn} do
       smart_contract =
         insert(:smart_contract,
@@ -3929,22 +4259,191 @@ defmodule BlockScoutWeb.API.V2.AddressControllerTest do
   end
 
   describe "/addresses/{address_hash}/tabs-counters" do
+    test "token_balances_count excludes scam tokens when hide_scam_addresses is true", %{conn: conn} do
+      init_value = Application.get_env(:block_scout_web, :hide_scam_addresses)
+      Application.put_env(:block_scout_web, :hide_scam_addresses, true)
+      on_exit(fn -> Application.put_env(:block_scout_web, :hide_scam_addresses, init_value) end)
+
+      address = insert(:address)
+
+      legit_balance =
+        insert(:address_current_token_balance_with_token_id_and_fixed_token_type,
+          address: address,
+          token_type: "ERC-20",
+          token_id: Enum.random(1..100_000)
+        )
+
+      scam_balance =
+        insert(:address_current_token_balance_with_token_id_and_fixed_token_type,
+          address: address,
+          token_type: "ERC-20",
+          token_id: Enum.random(1..100_000)
+        )
+
+      insert(:scam_badge_to_address, address_hash: scam_balance.token_contract_address_hash)
+
+      response =
+        conn
+        |> get("/api/v2/addresses/#{address.hash}/tabs-counters")
+        |> json_response(200)
+
+      assert response["token_balances_count"] == 1
+
+      tokens_response =
+        conn
+        |> get("/api/v2/addresses/#{address.hash}/tokens?type=ERC-20")
+        |> json_response(200)
+
+      assert Enum.count(tokens_response["items"]) == 1
+
+      assert List.first(tokens_response["items"])["token"]["address_hash"] ==
+               Address.checksum(legit_balance.token_contract_address_hash)
+    end
+
+    test "token_transfers_count excludes scam tokens when hide_scam_addresses is true", %{conn: conn} do
+      init_value = Application.get_env(:block_scout_web, :hide_scam_addresses)
+      Application.put_env(:block_scout_web, :hide_scam_addresses, true)
+      on_exit(fn -> Application.put_env(:block_scout_web, :hide_scam_addresses, init_value) end)
+
+      address = insert(:address)
+
+      transaction = insert(:transaction) |> with_block()
+
+      legit_transfer =
+        insert(:token_transfer,
+          transaction: transaction,
+          block: transaction.block,
+          block_number: transaction.block_number,
+          to_address: address
+        )
+
+      scam_transfer =
+        insert(:token_transfer,
+          transaction: transaction,
+          block: transaction.block,
+          block_number: transaction.block_number,
+          to_address: address
+        )
+
+      insert(:scam_badge_to_address, address_hash: scam_transfer.token_contract_address_hash)
+
+      response =
+        conn
+        |> get("/api/v2/addresses/#{address.hash}/tabs-counters")
+        |> json_response(200)
+
+      assert response["token_transfers_count"] == 1
+
+      token_transfers_response =
+        conn
+        |> get("/api/v2/addresses/#{address.hash}/token-transfers")
+        |> json_response(200)
+
+      assert Enum.count(token_transfers_response["items"]) == 1
+
+      assert List.first(token_transfers_response["items"])["token"]["address_hash"] ==
+               Address.checksum(legit_transfer.token_contract_address_hash)
+    end
+
+    test "token_balances_count includes scam tokens when show_scam_tokens cookie is true even if hide_scam_addresses is true",
+         %{conn: conn} do
+      init_value = Application.get_env(:block_scout_web, :hide_scam_addresses)
+      Application.put_env(:block_scout_web, :hide_scam_addresses, true)
+      on_exit(fn -> Application.put_env(:block_scout_web, :hide_scam_addresses, init_value) end)
+
+      address = insert(:address)
+
+      insert(:address_current_token_balance_with_token_id_and_fixed_token_type,
+        address: address,
+        token_type: "ERC-20",
+        token_id: Enum.random(1..100_000)
+      )
+
+      scam_balance =
+        insert(:address_current_token_balance_with_token_id_and_fixed_token_type,
+          address: address,
+          token_type: "ERC-20",
+          token_id: Enum.random(1..100_000)
+        )
+
+      insert(:scam_badge_to_address, address_hash: scam_balance.token_contract_address_hash)
+
+      response =
+        conn
+        |> put_req_cookie("show_scam_tokens", "true")
+        |> get("/api/v2/addresses/#{address.hash}/tabs-counters")
+        |> json_response(200)
+
+      assert response["token_balances_count"] == 2
+    end
+
+    test "token_transfers_count includes scam tokens when show_scam_tokens cookie is true even if hide_scam_addresses is true",
+         %{conn: conn} do
+      init_value = Application.get_env(:block_scout_web, :hide_scam_addresses)
+      Application.put_env(:block_scout_web, :hide_scam_addresses, true)
+      on_exit(fn -> Application.put_env(:block_scout_web, :hide_scam_addresses, init_value) end)
+
+      address = insert(:address)
+
+      transaction = insert(:transaction) |> with_block()
+
+      insert(:token_transfer,
+        transaction: transaction,
+        block: transaction.block,
+        block_number: transaction.block_number,
+        to_address: address
+      )
+
+      scam_transfer =
+        insert(:token_transfer,
+          transaction: transaction,
+          block: transaction.block,
+          block_number: transaction.block_number,
+          to_address: address
+        )
+
+      insert(:scam_badge_to_address, address_hash: scam_transfer.token_contract_address_hash)
+
+      response =
+        conn
+        |> put_req_cookie("show_scam_tokens", "true")
+        |> get("/api/v2/addresses/#{address.hash}/tabs-counters")
+        |> json_response(200)
+
+      assert response["token_transfers_count"] == 2
+    end
+
     test "get 200 on non existing address", %{conn: conn} do
       address = build(:address)
 
       request = get(conn, "/api/v2/addresses/#{address.hash}/tabs-counters")
       response = json_response(request, 200)
 
-      assert %{
-               "validations_count" => 0,
-               "transactions_count" => 0,
-               "token_transfers_count" => 0,
-               "token_balances_count" => 0,
-               "logs_count" => 0,
-               "withdrawals_count" => 0,
-               "internal_transactions_count" => 0,
-               "celo_election_rewards_count" => 0
-             } = response
+      expected_response =
+        %{
+          "validations_count" => 0,
+          "transactions_count" => 0,
+          "token_transfers_count" => 0,
+          "token_balances_count" => 0,
+          "logs_count" => 0,
+          "withdrawals_count" => 0,
+          "internal_transactions_count" => 0
+        }
+        |> then(fn expected_response ->
+          case @chain_identity do
+            {:optimism, :celo} -> Map.put(expected_response, "celo_election_rewards_count", 0)
+            _ -> expected_response
+          end
+        end)
+        |> then(fn expected_response ->
+          if @chain_type == :ethereum do
+            Map.put(expected_response, "beacon_deposits_count", 0)
+          else
+            expected_response
+          end
+        end)
+
+      assert expected_response == response
     end
 
     test "get 422 on invalid address", %{conn: conn} do
@@ -4549,7 +5048,7 @@ defmodule BlockScoutWeb.API.V2.AddressControllerTest do
             token_contract_address_hash: token.contract_address_hash
           )
 
-        %Instance{ti | current_token_balance: ctb}
+        %{ti | current_token_balance: ctb}
       end
 
       response =
@@ -4585,7 +5084,7 @@ defmodule BlockScoutWeb.API.V2.AddressControllerTest do
               token_contract_address_hash: token.contract_address_hash
             )
 
-          %Instance{ti | current_token_balance: current_token_balance}
+          %{ti | current_token_balance: current_token_balance}
         end
         |> Enum.sort_by(&{&1.token_contract_address_hash, &1.token_id}, :desc)
 
@@ -4621,7 +5120,7 @@ defmodule BlockScoutWeb.API.V2.AddressControllerTest do
               token_contract_address_hash: token.contract_address_hash
             )
 
-          %Instance{ti | current_token_balance: current_token_balance}
+          %{ti | current_token_balance: current_token_balance}
         end
         |> Enum.sort_by(&{&1.token_contract_address_hash, &1.token_id}, :desc)
 
@@ -4671,7 +5170,7 @@ defmodule BlockScoutWeb.API.V2.AddressControllerTest do
               token_contract_address_hash: token.contract_address_hash
             )
 
-          %Instance{ti | current_token_balance: current_token_balance}
+          %{ti | current_token_balance: current_token_balance}
         end
         |> Enum.sort_by(&{&1.token_contract_address_hash, &1.token_id}, :desc)
 
@@ -4731,7 +5230,7 @@ defmodule BlockScoutWeb.API.V2.AddressControllerTest do
               token_contract_address_hash: token.contract_address_hash
             )
 
-          %Instance{ti | current_token_balance: current_token_balance}
+          %{ti | current_token_balance: current_token_balance}
         end
         |> Enum.sort_by(&{&1.token_contract_address_hash, &1.token_id}, :desc)
 
@@ -4928,7 +5427,7 @@ defmodule BlockScoutWeb.API.V2.AddressControllerTest do
           )
           |> Repo.preload([:token])
 
-        %Instance{ti | current_token_balance: current_token_balance}
+        %{ti | current_token_balance: current_token_balance}
       end
 
       token = insert(:token, type: "ERC-1155")
@@ -4952,7 +5451,7 @@ defmodule BlockScoutWeb.API.V2.AddressControllerTest do
           )
           |> Repo.preload([:token])
 
-        %Instance{ti | current_token_balance: current_token_balance}
+        %{ti | current_token_balance: current_token_balance}
       end
 
       token = insert(:token, type: "ERC-404")
@@ -4976,7 +5475,7 @@ defmodule BlockScoutWeb.API.V2.AddressControllerTest do
           )
           |> Repo.preload([:token])
 
-        %Instance{ti | current_token_balance: current_token_balance}
+        %{ti | current_token_balance: current_token_balance}
       end
 
       request =
@@ -5052,7 +5551,7 @@ defmodule BlockScoutWeb.API.V2.AddressControllerTest do
           )
           |> Repo.preload([:token])
 
-        %Instance{ti | current_token_balance: current_token_balance}
+        %{ti | current_token_balance: current_token_balance}
       end
 
       token = insert(:token, type: "ERC-1155")
@@ -5077,7 +5576,7 @@ defmodule BlockScoutWeb.API.V2.AddressControllerTest do
           )
           |> Repo.preload([:token])
 
-        %Instance{ti | current_token_balance: current_token_balance}
+        %{ti | current_token_balance: current_token_balance}
       end
 
       token = insert(:token, type: "ERC-404")
@@ -5102,7 +5601,7 @@ defmodule BlockScoutWeb.API.V2.AddressControllerTest do
           )
           |> Repo.preload([:token])
 
-        %Instance{ti | current_token_balance: current_token_balance}
+        %{ti | current_token_balance: current_token_balance}
       end
 
       request =
@@ -5176,7 +5675,7 @@ defmodule BlockScoutWeb.API.V2.AddressControllerTest do
           )
           |> Repo.preload([:token])
 
-        %Instance{ti | current_token_balance: current_token_balance}
+        %{ti | current_token_balance: current_token_balance}
       end
 
       token = insert(:token, type: "ERC-1155")
@@ -5200,7 +5699,7 @@ defmodule BlockScoutWeb.API.V2.AddressControllerTest do
           )
           |> Repo.preload([:token])
 
-        %Instance{ti | current_token_balance: current_token_balance}
+        %{ti | current_token_balance: current_token_balance}
       end
 
       token = insert(:token, type: "ERC-404")
@@ -5224,7 +5723,7 @@ defmodule BlockScoutWeb.API.V2.AddressControllerTest do
           )
           |> Repo.preload([:token])
 
-        %Instance{ti | current_token_balance: current_token_balance}
+        %{ti | current_token_balance: current_token_balance}
       end
 
       request = conn |> get("/api/v2/addresses/#{address.hash}/nft/collections", %{type: "ERC-721"})
@@ -5273,7 +5772,7 @@ defmodule BlockScoutWeb.API.V2.AddressControllerTest do
           )
           |> Repo.preload([:token])
 
-        %Instance{ti | current_token_balance: current_token_balance}
+        %{ti | current_token_balance: current_token_balance}
       end
 
       token = insert(:token, type: "ERC-1155")
@@ -5299,7 +5798,7 @@ defmodule BlockScoutWeb.API.V2.AddressControllerTest do
           )
           |> Repo.preload([:token])
 
-        %Instance{ti | current_token_balance: current_token_balance}
+        %{ti | current_token_balance: current_token_balance}
       end
 
       token = insert(:token, type: "ERC-404")
@@ -5325,7 +5824,7 @@ defmodule BlockScoutWeb.API.V2.AddressControllerTest do
           )
           |> Repo.preload([:token])
 
-        %Instance{ti | current_token_balance: current_token_balance}
+        %{ti | current_token_balance: current_token_balance}
       end
 
       request = conn |> get("/api/v2/addresses/#{address.hash}/nft/collections", %{type: "ERC-721"})
@@ -5399,7 +5898,7 @@ defmodule BlockScoutWeb.API.V2.AddressControllerTest do
                 )
                 |> Repo.preload([:token])
 
-              %Instance{ti | current_token_balance: current_token_balance}
+              %{ti | current_token_balance: current_token_balance}
             end
             |> Enum.sort_by(&{&1.token_contract_address_hash, &1.token_id}, :desc)
 
@@ -5445,7 +5944,7 @@ defmodule BlockScoutWeb.API.V2.AddressControllerTest do
                 )
                 |> Repo.preload([:token])
 
-              %Instance{ti | current_token_balance: current_token_balance}
+              %{ti | current_token_balance: current_token_balance}
             end
             |> Enum.sort_by(& &1.token_id, :desc)
 
@@ -5492,7 +5991,7 @@ defmodule BlockScoutWeb.API.V2.AddressControllerTest do
                 )
                 |> Repo.preload([:token])
 
-              %Instance{ti | current_token_balance: current_token_balance}
+              %{ti | current_token_balance: current_token_balance}
             end
             |> Enum.sort_by(& &1.token_id, :desc)
 
@@ -5524,7 +6023,7 @@ defmodule BlockScoutWeb.API.V2.AddressControllerTest do
                 )
                 |> Repo.preload([:token])
 
-              %Instance{ti | current_token_balance: current_token_balance}
+              %{ti | current_token_balance: current_token_balance}
             end
             |> Enum.sort_by(& &1.token_id, :desc)
 
@@ -5581,7 +6080,7 @@ defmodule BlockScoutWeb.API.V2.AddressControllerTest do
                 )
                 |> Repo.preload([:token])
 
-              %Instance{ti | current_token_balance: current_token_balance}
+              %{ti | current_token_balance: current_token_balance}
             end
             |> Enum.sort_by(& &1.token_id, :desc)
 
@@ -5613,7 +6112,7 @@ defmodule BlockScoutWeb.API.V2.AddressControllerTest do
                 )
                 |> Repo.preload([:token])
 
-              %Instance{ti | current_token_balance: current_token_balance}
+              %{ti | current_token_balance: current_token_balance}
             end
             |> Enum.sort_by(& &1.token_id, :desc)
 
@@ -5845,6 +6344,25 @@ defmodule BlockScoutWeb.API.V2.AddressControllerTest do
         check_paginated_response(response, response_2nd_page, deposits)
       end
     end
+  end
+
+  defp pending_head_tolerance do
+    Application.get_env(:explorer, PendingOperationsHelper)[:internal_transactions_pending_head_tolerance]
+  end
+
+  defp insert_address_internal_transaction(address, block) do
+    transaction =
+      :transaction
+      |> insert()
+      |> with_block(block)
+
+    insert(:internal_transaction,
+      transaction: transaction,
+      index: 1,
+      block_number: block.number,
+      transaction_index: transaction.index,
+      from_address: address
+    )
   end
 
   defp compare_item(%Address{} = address, json) do

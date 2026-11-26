@@ -10,6 +10,7 @@ defmodule Explorer.Chain.SmartContract.Schema do
   alias Explorer.Chain.{
     Address,
     Address.Reputation,
+    Data,
     Hash,
     SmartContractAdditionalSource
   }
@@ -43,7 +44,7 @@ defmodule Explorer.Chain.SmartContract.Schema do
         field(:compiler_version, :string, null: false)
         field(:optimization, :boolean, null: false)
         field(:contract_source_code, :string, null: false)
-        field(:constructor_arguments, :string)
+        field(:constructor_arguments, Data)
         field(:evm_version, :string)
         embeds_many(:external_libraries, ExternalLibrary, on_replace: :delete)
         field(:abi, {:array, :map})
@@ -125,6 +126,7 @@ defmodule Explorer.Chain.SmartContract do
   alias Explorer.Chain.SmartContract.Proxy.Models.Implementation
   alias Explorer.Helper, as: ExplorerHelper
   alias Explorer.SmartContract.Helper
+  alias Explorer.SmartContract.Solidity.Publisher, as: SolidityPublisher
   alias Explorer.SmartContract.Solidity.Verifier
 
   @typep api? :: {:api?, true | false}
@@ -801,8 +803,10 @@ defmodule Explorer.Chain.SmartContract do
     given address.
 
     This function searches the database for previously verified contracts that
-    have the same bytecode (identified by contract_code_md5) as the target
-    address. These "bytecode twins" allow users to view verified source code for
+    have the same bytecode as the target address. Candidates are located by
+    `contract_code_md5`, which serves only as an index key: since MD5 collisions
+    are cheap to produce, a candidate is accepted only if its bytecode is
+    byte-for-byte equal to the target's. These "bytecode twins" allow users to view verified source code for
     contracts that haven't been explicitly verified themselves.
 
     ## Parameters
@@ -832,8 +836,10 @@ defmodule Explorer.Chain.SmartContract do
     verified_bytecode_twin_contract_query =
       from(
         smart_contract in __MODULE__,
+        inner_join: twin_address in assoc(smart_contract, :address),
         where: smart_contract.contract_code_md5 == ^contract_code_md5,
         where: smart_contract.address_hash != ^target_address_hash,
+        where: twin_address.contract_code == ^target_address.contract_code,
         select: smart_contract,
         limit: 1
       )
@@ -852,6 +858,7 @@ defmodule Explorer.Chain.SmartContract do
           smart_contract
       ) do
     if args = Verifier.parse_constructor_arguments_for_sourcify_contract(address_hash, smart_contract.abi) do
+      args = SolidityPublisher.clear_constructor_arguments(args)
       smart_contract |> __MODULE__.changeset(%{constructor_arguments: args}) |> Repo.update()
       %__MODULE__{smart_contract | constructor_arguments: args}
     else
@@ -868,6 +875,7 @@ defmodule Explorer.Chain.SmartContract do
       ) do
     if args =
          Verifier.parse_constructor_arguments_for_sourcify_contract(address_hash, smart_contract.abi, deployed_bytecode) do
+      args = SolidityPublisher.clear_constructor_arguments(args)
       smart_contract |> __MODULE__.changeset(%{constructor_arguments: args}) |> Repo.update()
       %Address{address | smart_contract: %__MODULE__{smart_contract | constructor_arguments: args}}
     else
@@ -1293,6 +1301,38 @@ defmodule Explorer.Chain.SmartContract do
 
   def get_abi(address_hash_string, _) when is_nil(address_hash_string) do
     []
+  end
+
+  @doc """
+  Gets ABIs of the verified smart contracts among the given address hashes in a
+  single query.
+
+  Only the `abi` column is selected. Address hashes without a verified smart
+  contract are absent from the result.
+
+  ## Parameters
+  - `address_hashes`: The address hashes to look up.
+  - `options`: An optional keyword list of options, such as selecting a specific repository.
+
+  ## Returns
+  - A map of address hash to ABI.
+  """
+  @spec abis_by_address_hashes([Hash.Address.t()], Keyword.t()) :: %{Hash.Address.t() => abi() | nil}
+  def abis_by_address_hashes(address_hashes, options \\ [])
+
+  def abis_by_address_hashes([], _options), do: %{}
+
+  def abis_by_address_hashes(address_hashes, options) do
+    query =
+      from(
+        smart_contract in __MODULE__,
+        where: smart_contract.address_hash in ^address_hashes,
+        select: {smart_contract.address_hash, smart_contract.abi}
+      )
+
+    query
+    |> Chain.select_repo(options).all()
+    |> Map.new()
   end
 
   @doc """

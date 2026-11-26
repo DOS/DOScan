@@ -20,9 +20,9 @@ defmodule BlockScoutWeb.Mixfile do
       lockfile: "../../mix.lock",
       package: package(),
       start_permanent: Mix.env() == :prod,
-      version: "11.2.8",
-      xref: [
-        exclude: [
+      version: "12.1.0",
+      elixirc_options: [
+        no_warn_undefined: [
           Explorer.Chain.Beacon.Reader,
           Explorer.Chain.Cache.OptimismFinalizationPeriod,
           Explorer.Chain.Optimism.OutputRoot,
@@ -103,7 +103,6 @@ defmodule BlockScoutWeb.Mixfile do
       {:cldr_utils, "~> 2.3"},
       {:ex_machina, "~> 2.1", only: [:test]},
       {:explorer, in_umbrella: true},
-      {:exvcr, "~> 0.10", only: :test},
       {:file_info, "~> 0.0.4"},
       # HTML CSS selectors for Phoenix controller tests
       {:floki, "~> 0.31"},
@@ -111,20 +110,21 @@ defmodule BlockScoutWeb.Mixfile do
       {:gettext, "~> 0.26.1"},
       {:hammer, "~> 7.0"},
       {:hammer_backend_redis, "~> 7.0"},
-      {:httpoison, "~> 2.0"},
+      {:httpoison, "~> 3.0"},
       {:indexer, in_umbrella: true, runtime: false},
-      # JSON parser and generator
-      {:jason, "~> 1.3"},
       {:junit_formatter, ">= 0.0.0", only: [:test], runtime: false},
       # Log errors and application output to separate files
-      {:logger_file_backend, "~> 0.0.10"},
+      {:logger_file_backend, "~> 0.1.1"},
       {:logger_json, "~> 7.0"},
       {:math, "~> 0.7.0"},
+      # `mock` pins `meck ~> 0.9.2`, which fails to compile on OTP 29 (bare `catch`
+      # deprecation + `warnings_as_errors`). meck 1.x keeps the same API.
+      {:meck, "~> 1.2", override: true, only: [:test], runtime: false},
       {:mock, "~> 0.3.0", only: [:test], runtime: false},
       {:number, "~> 1.0.1"},
       {:phoenix, "== 1.6.17"},
       {:phoenix_ecto, "~> 4.1"},
-      {:phoenix_html, "== 4.3.0"},
+      {:phoenix_html, "== 4.4.0"},
       {:phoenix_html_helpers, "~> 1.0"},
       {:phoenix_live_reload, "~> 1.6", only: [:dev]},
       {:phoenix_live_view, "~> 1.1"},
@@ -132,9 +132,6 @@ defmodule BlockScoutWeb.Mixfile do
       {:prometheus_ex, "~> 5.1.0", override: true},
       # use `:cowboy` for WebServer with `:plug`
       {:plug_cowboy, "~> 2.2"},
-      # Waiting for the Pretty Print to be implemented at the Jason lib
-      # https://github.com/michalmuskala/jason/issues/15
-      {:poison, "~> 5.0.0"},
       {:postgrex, ">= 0.0.0"},
       {:prometheus, "~> 6.0", override: true},
       # Expose metrics from URL Prometheus server can scrape
@@ -153,7 +150,7 @@ defmodule BlockScoutWeb.Mixfile do
       {:spandex_datadog, "~> 1.0"},
       # `:spandex` tracing of `:phoenix`
       {:spandex_phoenix, "~> 1.0"},
-      {:timex, "~> 3.7.1"},
+      {:timex, "~> 4.0.0"},
       {:wallaby, "~> 0.30", only: :test, runtime: false},
       # `:cowboy` `~> 2.0` and Phoenix 1.4 compatibility
       {:ex_json_schema, "~> 0.11.0"},

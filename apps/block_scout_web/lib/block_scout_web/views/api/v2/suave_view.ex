@@ -6,7 +6,7 @@ defmodule BlockScoutWeb.API.V2.SuaveView do
   alias Explorer.Helper, as: ExplorerHelper
 
   alias Ecto.Association.NotLoaded
-  alias Explorer.Chain.{Address, Hash, Transaction}
+  alias Explorer.Chain.{Address, Hash, Log, Transaction}
 
   @suave_bid_event "0x83481d5b04dea534715acad673a8177a46fc93882760f36bdc16ccac439d504e"
 
@@ -17,22 +17,22 @@ defmodule BlockScoutWeb.API.V2.SuaveView do
         conn,
         watchlist_names
       ) do
-    if is_nil(Map.get(transaction, :execution_node_hash)) do
+    if is_nil(ExplorerHelper.chain_type_field(transaction, :execution_node_hash)) do
       out_json
     else
-      wrapped_to_address = Map.get(transaction, :wrapped_to_address)
-      wrapped_to_address_hash = Map.get(transaction, :wrapped_to_address_hash)
-      wrapped_input = Map.get(transaction, :wrapped_input)
-      wrapped_hash = Map.get(transaction, :wrapped_hash)
-      execution_node = Map.get(transaction, :execution_node)
-      execution_node_hash = Map.get(transaction, :execution_node_hash)
-      wrapped_type = Map.get(transaction, :wrapped_type)
-      wrapped_nonce = Map.get(transaction, :wrapped_nonce)
-      wrapped_gas = Map.get(transaction, :wrapped_gas)
-      wrapped_gas_price = Map.get(transaction, :wrapped_gas_price)
-      wrapped_max_priority_fee_per_gas = Map.get(transaction, :wrapped_max_priority_fee_per_gas)
-      wrapped_max_fee_per_gas = Map.get(transaction, :wrapped_max_fee_per_gas)
-      wrapped_value = Map.get(transaction, :wrapped_value)
+      wrapped_to_address = ExplorerHelper.chain_type_field(transaction, :wrapped_to_address)
+      wrapped_to_address_hash = ExplorerHelper.chain_type_field(transaction, :wrapped_to_address_hash)
+      wrapped_input = ExplorerHelper.chain_type_field(transaction, :wrapped_input)
+      wrapped_hash = ExplorerHelper.chain_type_field(transaction, :wrapped_hash)
+      execution_node = ExplorerHelper.chain_type_field(transaction, :execution_node)
+      execution_node_hash = ExplorerHelper.chain_type_field(transaction, :execution_node_hash)
+      wrapped_type = ExplorerHelper.chain_type_field(transaction, :wrapped_type)
+      wrapped_nonce = ExplorerHelper.chain_type_field(transaction, :wrapped_nonce)
+      wrapped_gas = ExplorerHelper.chain_type_field(transaction, :wrapped_gas)
+      wrapped_gas_price = ExplorerHelper.chain_type_field(transaction, :wrapped_gas_price)
+      wrapped_max_priority_fee_per_gas = ExplorerHelper.chain_type_field(transaction, :wrapped_max_priority_fee_per_gas)
+      wrapped_max_fee_per_gas = ExplorerHelper.chain_type_field(transaction, :wrapped_max_fee_per_gas)
+      wrapped_value = ExplorerHelper.chain_type_field(transaction, :wrapped_value)
 
       [wrapped_decoded_input] =
         Transaction.decode_transactions(
@@ -104,7 +104,9 @@ defmodule BlockScoutWeb.API.V2.SuaveView do
       |> Enum.map(fn sbc -> String.downcase(String.trim(sbc)) end)
 
     bid_event =
-      Enum.find(logs, fn log ->
+      logs
+      |> Log.prepare_optimized_fields(api?: true)
+      |> Enum.find(fn log ->
         sanitize_log_first_topic(log.first_topic) == @suave_bid_event &&
           Enum.member?(suave_bid_contracts, String.downcase(Hash.to_string(log.address_hash)))
       end)
