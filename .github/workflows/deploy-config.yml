@@ -141,7 +141,7 @@ jobs:
   deploy-mainnet:
     needs: changes
     if: needs.changes.outputs.mainnet == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     environment: mainnet
     env:
       AA_V07_SOURCE_REPOSITORY: https://github.com/eth-infinitism/account-abstraction.git
@@ -827,7 +827,7 @@ jobs:
   deploy-testnet:
     needs: changes
     if: needs.changes.outputs.testnet == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     environment: testnet
     env:
       AA_SOURCE_REPOSITORY: https://github.com/eth-infinitism/account-abstraction.git
